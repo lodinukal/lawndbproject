@@ -199,16 +199,15 @@ class SettingsTab(ctk.CTkFrame):
         reset_database_button.pack(pady=5)
 
 
-class TabView(ctk.CTkTabview):
+class DirectAccessTabView(ctk.CTkTabview):
     def __init__(self, app_state: State, master=None):
         super().__init__(master)
         self.app_state = app_state
-        self.add("Home")
         self.add("Customers")
         self.add("Properties")
         self.add("Bookings")
         self.add("Settings")
-        self.set("Home")  # Set the default tab
+        self.set("Customers")  # Set the default tab
 
         self.customers_tab = CustomerTab(
             app_state=self.app_state, master=self.tab("Customers")
@@ -231,6 +230,262 @@ class TabView(ctk.CTkTabview):
         self.settings_tab.pack(expand=True, fill="both")
 
 
+class CreateCustomerForm(ctk.CTkFrame):
+    def __init__(self, app_state: State, master=None):
+        super().__init__(master)
+        self.app_state = app_state
+
+        self.first_name_entry = ctk.CTkEntry(master=self, placeholder_text="First Name")
+        self.first_name_entry.pack(pady=5)
+
+        self.last_name_entry = ctk.CTkEntry(master=self, placeholder_text="Last Name")
+        self.last_name_entry.pack(pady=5)
+
+        self.email_entry = ctk.CTkEntry(master=self, placeholder_text="Email")
+        self.email_entry.pack(pady=5)
+
+        self.phone_entry = ctk.CTkEntry(master=self, placeholder_text="Phone Number")
+        self.phone_entry.pack(pady=5)
+
+        self.submit_button = ctk.CTkButton(
+            master=self, text="Submit", command=self.submit
+        )
+        self.submit_button.pack(pady=5)
+
+    def submit(self):
+        first_name = self.first_name_entry.get()
+        last_name = self.last_name_entry.get()
+        email = self.email_entry.get()
+        phone = self.phone_entry.get()
+
+        if not (first_name and last_name and email and phone):
+            ErrorDialog("All fields are required.", master=self)
+            return
+
+        customer_model = CustomerModel(-1, first_name, last_name, email, phone)
+        if self.app_state.database.add_customer(customer_model):
+            ErrorDialog("Customer created successfully.", master=self)
+            self.clear_fields()
+        else:
+            ErrorDialog(
+                f"Failed to create customer: {self.app_state.database.last_error}",
+                master=self,
+            )
+
+    def clear_fields(self):
+        self.first_name_entry.delete(0, "end")
+        self.last_name_entry.delete(0, "end")
+        self.email_entry.delete(0, "end")
+        self.phone_entry.delete(0, "end")
+
+
+class CreatePropertyForm(ctk.CTkFrame):
+    def __init__(self, app_state: State, master=None):
+        super().__init__(master)
+        self.app_state = app_state
+
+        self.street_number_entry = ctk.CTkEntry(
+            master=self, placeholder_text="Street Number"
+        )
+        self.street_number_entry.pack(pady=5)
+
+        self.unit_entry = ctk.CTkEntry(master=self, placeholder_text="Unit (optional)")
+        self.unit_entry.pack(pady=5)
+
+        self.street_name_entry = ctk.CTkEntry(
+            master=self, placeholder_text="Street Name"
+        )
+        self.street_name_entry.pack(pady=5)
+
+        self.city_entry = ctk.CTkEntry(master=self, placeholder_text="City")
+        self.city_entry.pack(pady=5)
+
+        self.post_code_entry = ctk.CTkEntry(master=self, placeholder_text="Post Code")
+        self.post_code_entry.pack(pady=5)
+
+        self.submit_button = ctk.CTkButton(
+            master=self, text="Submit", command=self.submit
+        )
+        self.submit_button.pack(pady=5)
+
+    def submit(self):
+        street_number = self.street_number_entry.get()
+        unit = self.unit_entry.get()
+        street_name = self.street_name_entry.get()
+        city = self.city_entry.get()
+        post_code = self.post_code_entry.get()
+
+        if not (street_number and street_name and city and post_code):
+            ErrorDialog(
+                "Street Number, Street Name, City, and Post Code are required.",
+                master=self,
+            )
+            return
+
+        property_model = PropertyModel(
+            -1,
+            int(street_number),
+            unit if len(unit) > 0 else None,
+            street_name,
+            city,
+            post_code,
+        )
+        if self.app_state.database.add_property(property_model):
+            ErrorDialog("Property created successfully.", master=self)
+            self.clear_fields()
+        else:
+            ErrorDialog(
+                f"Failed to create property: {self.app_state.database.last_error}",
+                master=self,
+            )
+
+    def clear_fields(self):
+        self.street_number_entry.delete(0, "end")
+        self.unit_entry.delete(0, "end")
+        self.street_name_entry.delete(0, "end")
+        self.city_entry.delete(0, "end")
+        self.post_code_entry.delete(0, "end")
+
+
+class SearchbarWithCompletion(ctk.CTkFrame):
+    def __init__(self, app_state: State, title, search_fn, on_choose, master=None):
+        super().__init__(master)
+        self.title = title
+        self.app_state = app_state
+        self.search_fn = search_fn
+        self.on_choose = on_choose
+
+        self.title_label = ctk.CTkLabel(master=self, text=self.title)
+        self.title_label.pack(pady=5)
+
+        self.search_entry = ctk.CTkEntry(master=self, placeholder_text="Search")
+        self.search_entry.pack(expand=True, fill="x", padx=10, pady=10)
+
+        self.options = ctk.CTkScrollableFrame(self)
+        self.options.pack(expand=True, fill="both", padx=10, pady=10)
+
+        # as the user types, we will show the results in this frame
+        self.search_entry.bind("<KeyRelease>", self.on_search)
+
+    def on_search(self, event=None):
+        search_text = self.search_entry.get().strip()
+        if search_text:
+            results = self.search_fn(search_text)
+            self.update_options(results)
+        else:
+            self.update_options([])
+
+    def update_options(self, results):
+        for widget in self.options.winfo_children():
+            widget.destroy()
+
+        for item in results:
+            option_button = ctk.CTkButton(
+                master=self.options,
+                text=str(item),
+                command=lambda i=item: self.on_choose(i),
+            )
+            option_button.pack(fill="x", padx=5, pady=2)
+
+
+class CreateBookingForm(ctk.CTkScrollableFrame):
+    def __init__(self, app_state: State, master=None):
+        super().__init__(master)
+        self.app_state = app_state
+
+        self.splitter = ctk.CTkFrame(master=self)
+
+        self.customer_search = SearchbarWithCompletion(
+            title="Search Customers",
+            app_state=self.app_state,
+            search_fn=self.app_state.database.search_customers,
+            on_choose=self.on_customer_choose,
+            master=self.splitter,
+        )
+        # self.customer_search.pack(expand=True, fill="x", padx=10, pady=10)
+        self.customer_search.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+
+        self.property_search = SearchbarWithCompletion(
+            title="Search Properties",
+            app_state=self.app_state,
+            search_fn=self.app_state.database.search_properties,
+            on_choose=self.on_property_choose,
+            master=self.splitter,
+        )
+        self.property_search.grid(row=0, column=1, sticky="ew", padx=10, pady=10)
+
+        self.splitter.pack(expand=True, fill="x", padx=10, pady=10)
+        self.splitter.columnconfigure(0, weight=1)
+        self.splitter.columnconfigure(1, weight=1)
+
+        self.when_entry = ctk.CTkEntry(master=self, placeholder_text="When")
+        self.when_entry.pack(pady=5)
+
+        self.submit_button = ctk.CTkButton(
+            master=self, text="Submit", command=self.submit
+        )
+        self.submit_button.pack(pady=5)
+
+    def on_customer_choose(self, customer_name):
+        print(f"Selected customer: {customer_name}")
+        # Handle customer selection
+        pass
+
+    def on_property_choose(self, property_name):
+        print(f"Selected property: {property_name}")
+        # Handle property selection
+        pass
+
+    def submit(self):
+        # Handle form submission
+        pass
+
+
+class TabView(ctk.CTkTabview):
+    def __init__(self, app_state: State, master=None):
+        super().__init__(master)
+        self.app_state = app_state
+
+        self.add("Home")
+        self.add("Customers")
+        self.add("Properties")
+        self.add("Bookings")
+        self.add("Direct Access")
+        self.set("Home")
+
+        self.home_tab = ctk.CTkFrame(self.tab("Home"))
+        self.home_tab.pack(expand=True, fill="both")
+
+        self.customers_tab = ctk.CTkFrame(self.tab("Customers"))
+        self.customers_tab.pack(expand=True, fill="both")
+
+        self.create_customer_form = CreateCustomerForm(
+            app_state=self.app_state, master=self.customers_tab
+        )
+        self.create_customer_form.pack(expand=True, fill="both")
+
+        self.properties_tab = ctk.CTkFrame(self.tab("Properties"))
+        self.properties_tab.pack(expand=True, fill="both")
+
+        self.create_property_form = CreatePropertyForm(
+            app_state=self.app_state, master=self.properties_tab
+        )
+        self.create_property_form.pack(expand=True, fill="both")
+
+        self.bookings_tab = ctk.CTkFrame(self.tab("Bookings"))
+        self.bookings_tab.pack(expand=True, fill="both")
+
+        self.create_booking_form = CreateBookingForm(
+            app_state=self.app_state, master=self.bookings_tab
+        )
+        self.create_booking_form.pack(expand=True, fill="both")
+
+        self.direct_access_tab = DirectAccessTabView(
+            app_state=self.app_state, master=self.tab("Direct Access")
+        )
+        self.direct_access_tab.pack(expand=True, fill="both")
+
+
 class Ui(ctk.CTk):
     def __init__(self, app_state: State):
         super().__init__()
@@ -242,6 +497,9 @@ class Ui(ctk.CTk):
         # Create UI elements here
         label = ctk.CTkLabel(master=self, text="Lawn Database")
         label.pack(pady=20)
+
+        # self.tab_view = TabView(app_state=self.app_state, master=self)
+        # self.tab_view.pack(expand=True, fill="both")
 
         self.tab_view = TabView(app_state=self.app_state, master=self)
         self.tab_view.pack(expand=True, fill="both")

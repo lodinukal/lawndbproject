@@ -33,6 +33,12 @@ class CustomerModel:
         if not self.last_name:
             self.last_name = "Last name"
 
+    def __repr__(self) -> str:
+        """
+        Returns a nicely formatted string representation of the customer.
+        """
+        return f"{self.first_name} {self.last_name} ({self.email}, {self.phone})"
+
 
 @dataclass
 class PropertyModel:
@@ -63,6 +69,13 @@ class PropertyModel:
             self.unit = ""
         if isinstance(self.post_code, str):
             self.post_code = int(self.post_code)
+
+    def __repr__(self) -> str:
+        """
+        Returns a nicely formatted string representation of the property.
+        """
+        unit_str = f"Unit {self.unit}, " if self.unit else ""
+        return f"{self.street_number} {unit_str}{self.street_name}, {self.city}, {self.post_code}"
 
 
 @dataclass
@@ -96,11 +109,85 @@ class BookingModel:
         if isinstance(self.when, str):
             self.when = datetime.fromisoformat(self.when)
 
+    def __repr__(self) -> str:
+        """
+        Returns a nicely formatted string representation of the booking.
+        """
+        return f"Booking {self.id} for Customer {self.customer_id} at Property {self.property_id} on {self.when.strftime('%Y-%m-%d %H:%M:%S')}"
+
+
+@dataclass
+class ServiceModel:
+    id: int
+    name: str
+    base_price: float
+
+    def is_transient(self) -> bool:
+        return self.id == -1
+
+    def to_list(self) -> list:
+        return [self.id, self.name, self.base_price]
+
+    def assure(self):
+        self.id = int(self.id)
+        if isinstance(self.name, str):
+            self.name = self.name.strip()
+        if isinstance(self.base_price, str):
+            try:
+                self.base_price = float(self.base_price)
+            except ValueError:
+                self.base_price = 0.0
+
+    def __repr__(self) -> str:
+        """
+        Returns a nicely formatted string representation of the service.
+        """
+        return f"Service {self.id}: {self.name} at base price ${self.base_price:.2f}"
+
+
+@dataclass
+class BookingServiceModel:
+    booking_id: int
+    service_id: int
+    duration: int
+    additional_cost: float
+    notes: str
+    completed: bool
+
+    def is_transient(self) -> bool:
+        return self.booking_id == -1 or self.service_id == -1
+
+    def to_list(self) -> list:
+        return [
+            self.booking_id,
+            self.service_id,
+            self.duration,
+            self.additional_cost,
+            self.notes,
+            self.completed,
+        ]
+
+    def assure(self):
+        self.booking_id = int(self.booking_id)
+        self.service_id = int(self.service_id)
+        self.duration = int(self.duration)
+        if isinstance(self.additional_cost, str):
+            try:
+                self.additional_cost = float(self.additional_cost)
+            except ValueError:
+                self.additional_cost = 0.0
+        if isinstance(self.notes, str):
+            self.notes = self.notes.strip()
+        if not isinstance(self.completed, bool):
+            self.completed = bool(self.completed)
+
 
 class Database:
     customers_changed: Signal
     properties_changed: Signal
     bookings_changed: Signal
+    services_changed: Signal
+    booking_services_changed: Signal
 
     last_error: str = ""
 
@@ -110,6 +197,8 @@ class Database:
         self.customers_changed = Signal()
         self.properties_changed = Signal()
         self.bookings_changed = Signal()
+        self.services_changed = Signal()
+        self.booking_services_changed = Signal()
         self.last_error = ""
 
         self.cursor.execute("PRAGMA foreign_keys = ON")
@@ -528,3 +617,361 @@ class Database:
         if row:
             return BookingModel(*row)
         return None
+
+    def get_bookings_by_customer_id(self, customer_id: int):
+        """
+        Returns a list of bookings for a specific customer by their id.
+        """
+        query = "SELECT * FROM Booking WHERE customer_id = ?"
+        self.cursor.execute(query, (customer_id,))
+        rows = self.cursor.fetchall()
+        return [BookingModel(*row) for row in rows]
+
+    def get_bookings_by_property_id(self, property_id: int):
+        """
+        Returns a list of bookings for a specific property by its id.
+        """
+        query = "SELECT * FROM Booking WHERE property_id = ?"
+        self.cursor.execute(query, (property_id,))
+        rows = self.cursor.fetchall()
+        return [BookingModel(*row) for row in rows]
+
+    # services
+    def add_service(self, model: ServiceModel) -> bool:
+        """
+        Adds a service to the database and returns True if successful, False otherwise.
+        If the model has an id of -1, it is considered transient and will be assigned a new id.
+        Otherwise, it will return False. If successful, the model's id will be updated.
+        """
+        if model.is_transient():
+            return self.add_service(model)
+        else:
+            return self.update_service(model)
+
+    def update_service(self, model: ServiceModel) -> bool:
+        """
+        Updates an existing service in the database.
+        Returns True if successful, False otherwise.
+        """
+        query = """
+        INSERT INTO Service (id, name, base_price)
+        VALUES (?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            base_price = excluded.base_price
+        """
+        try:
+            self.cursor.execute(
+                query,
+                (model.id, model.name, model.base_price),
+            )
+        except sqlite3.IntegrityError as e:
+            self.last_error = str(e)
+            return False
+        self.connection.commit()
+
+        success = self.cursor.rowcount > 0
+        if success:
+            self.services_changed.emit()
+
+        return success
+
+    def get_service_by_id(self, service_id: int) -> ServiceModel | None:
+        """
+        Returns a service by id or None if not found.
+        """
+        query = "SELECT * FROM Service WHERE id = ?"
+        self.cursor.execute(query, (service_id,))
+        row = self.cursor.fetchone()
+        if row:
+            return ServiceModel(*row)
+        return None
+
+    def get_all_services(self, page: int, page_size: int = 10):
+        """
+        Returns a list of all services in the database, paginated.
+        """
+        offset = (page - 1) * page_size
+        query = "SELECT * FROM Service LIMIT ? OFFSET ?"
+        self.cursor.execute(query, (page_size, offset))
+        rows = self.cursor.fetchall()
+        return [ServiceModel(*row) for row in rows]
+
+    def get_num_service_pages(self, page_size: int = 10) -> int:
+        """
+        Returns the number of pages of services in the database.
+        """
+        query = "SELECT COUNT(*) FROM Service"
+        self.cursor.execute(query)
+        total_services = self.cursor.fetchone()[0]
+        return (total_services + page_size - 1) // page_size
+
+    def remove_service_by_id(self, ids: list[int]) -> bool:
+        """
+        Removes a service by id and returns True if successful, False otherwise.
+        """
+        query = "DELETE FROM Service WHERE id IN ({})".format(
+            ",".join("?" for _ in ids)
+        )
+        self.cursor.execute(query, ids)
+        self.connection.commit()
+
+        success = self.cursor.rowcount > 0
+        if success:
+            self.services_changed.emit()
+        return success
+
+    def remove_service(self, model: ServiceModel) -> bool:
+        """
+        Removes a service model from the database and returns True if successful and removes the id from the model, False otherwise.
+        """
+        if model.is_transient():
+            return False
+        success = self.remove_service_by_id(model.id)
+        if success:
+            model.id = -1
+        return success
+
+    def add_or_update_service(self, model: ServiceModel) -> bool:
+        """
+        Adds a new service to the database or updates an existing one.
+        """
+        if model.is_transient():
+            return self.add_service(model)
+        else:
+            return self.update_service(model)
+
+    # booking services
+    def add_booking_service(self, model: BookingServiceModel) -> bool:
+        """
+        Adds a booking service to the database and returns True if successful, False otherwise.
+        If the model has a booking_id or service_id of -1, it is considered transient and will be assigned a new id.
+        Otherwise, it will return False. If successful, the model's booking_id and service_id will be updated.
+        """
+        if not model.is_transient():
+            return False
+        query = """
+        INSERT INTO BookingService (booking_id, service_id, duration, additional_cost, notes, completed)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """
+        try:
+            self.cursor.execute(
+                query,
+                (
+                    model.booking_id,
+                    model.service_id,
+                    model.duration,
+                    model.additional_cost,
+                    model.notes,
+                    model.completed,
+                ),
+            )
+        except sqlite3.IntegrityError as e:
+            self.last_error = str(e)
+            return False
+        self.connection.commit()
+
+        success = model.booking_id != -1 and model.service_id != -1
+        if success:
+            self.booking_services_changed.emit()
+
+        return success
+
+    def get_all_booking_services(self, page: int, page_size: int = 10):
+        """
+        Returns a list of all booking services in the database, paginated.
+        """
+        offset = (page - 1) * page_size
+        query = "SELECT * FROM BookingService LIMIT ? OFFSET ?"
+        self.cursor.execute(query, (page_size, offset))
+        rows = self.cursor.fetchall()
+        return [BookingServiceModel(*row) for row in rows]
+
+    def get_num_booking_service_pages(self, page_size: int = 10) -> int:
+        """
+        Returns the number of pages of booking services in the database.
+        """
+        query = "SELECT COUNT(*) FROM BookingService"
+        self.cursor.execute(query)
+        total_booking_services = self.cursor.fetchone()[0]
+        return (total_booking_services + page_size - 1) // page_size
+
+    def remove_booking_service_by_booking_service_id(
+        self, booking_id: int, service_id: int
+    ) -> bool:
+        """
+        Removes a booking service by booking_id and service_id and returns True if successful, False otherwise.
+        """
+        query = "DELETE FROM BookingService WHERE booking_id = ? AND service_id = ?"
+        self.cursor.execute(query, (booking_id, service_id))
+        self.connection.commit()
+
+        success = self.cursor.rowcount > 0
+        if success:
+            self.booking_services_changed.emit()
+        return success
+
+    def remove_booking_service(self, model: BookingServiceModel) -> bool:
+        """
+        Removes a booking service model from the database and returns True if successful and removes the booking_id and service_id from the model, False otherwise.
+        """
+        if model.is_transient():
+            return False
+        success = self.remove_booking_service_by_booking_service_id(
+            model.booking_id, model.service_id
+        )
+        if success:
+            model.booking_id = -1
+            model.service_id = -1
+        return success
+
+    def add_or_update_booking_service(self, model: BookingServiceModel) -> bool:
+        """
+        Adds a new booking service to the database or updates an existing one.
+        """
+        if model.is_transient():
+            return self.add_booking_service(model)
+        else:
+            return self.update_booking_service(model)
+
+    def update_booking_service(self, model: BookingServiceModel) -> bool:
+        """
+        Updates an existing booking service in the database.
+        Returns True if successful, False otherwise.
+        """
+        query = """
+        INSERT INTO BookingService (booking_id, service_id, duration, additional_cost, notes, completed)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(booking_id, service_id) DO UPDATE SET
+            duration = excluded.duration,
+            additional_cost = excluded.additional_cost,
+            notes = excluded.notes,
+            completed = excluded.completed
+        """
+        try:
+            self.cursor.execute(
+                query,
+                (
+                    model.booking_id,
+                    model.service_id,
+                    model.duration,
+                    model.additional_cost,
+                    model.notes,
+                    model.completed,
+                ),
+            )
+        except sqlite3.IntegrityError as e:
+            self.last_error = str(e)
+            return False
+        self.connection.commit()
+
+        success = self.cursor.rowcount > 0
+        if success:
+            self.booking_services_changed.emit()
+
+        return success
+
+    def get_booking_service_by_booking_id_and_service_id(
+        self, booking_id: int, service_id: int
+    ) -> BookingServiceModel | None:
+        """
+        Returns a booking service by booking_id and service_id or None if not found.
+        """
+        query = "SELECT * FROM BookingService WHERE booking_id = ? AND service_id = ?"
+        self.cursor.execute(query, (booking_id, service_id))
+        row = self.cursor.fetchone()
+        if row:
+            return BookingServiceModel(*row)
+        return None
+
+    def get_booking_services_by_booking_id(self, booking_id: int):
+        """
+        Returns a list of booking services for a specific booking by its id.
+        """
+        query = "SELECT * FROM BookingService WHERE booking_id = ?"
+        self.cursor.execute(query, (booking_id,))
+        rows = self.cursor.fetchall()
+        return [BookingServiceModel(*row) for row in rows] if rows else []
+
+    def get_booking_services_by_service_id(self, service_id: int):
+        """
+        Returns a list of booking services for a specific service by its id.
+        """
+        query = "SELECT * FROM BookingService WHERE service_id = ?"
+        self.cursor.execute(query, (service_id,))
+        rows = self.cursor.fetchall()
+        return [BookingServiceModel(*row) for row in rows] if rows else []
+
+    # special methods
+    # getting the number of bookings for a customer
+    def get_num_bookings_for_customer(self, customer_id: int) -> int:
+        """
+        Returns the number of bookings for a specific customer by their id.
+        """
+        query = "SELECT COUNT(*) FROM Booking WHERE customer_id = ?"
+        self.cursor.execute(query, (customer_id,))
+        return self.cursor.fetchone()[0]
+
+    def get_num_bookings_for_property(self, property_id: int) -> int:
+        """
+        Returns the number of bookings for a specific property by its id.
+        """
+        query = "SELECT COUNT(*) FROM Booking WHERE property_id = ?"
+        self.cursor.execute(query, (property_id,))
+
+    def get_uncompleted_bookings(self):
+        """
+        Returns a list of all bookings that are not completed.
+        """
+        query = "SELECT * FROM BookingService WHERE completed = 0"
+        self.cursor.execute(query)
+        rows = self.cursor.fetchall()
+        return [BookingServiceModel(*row) for row in rows] if rows else []
+
+    def get_uncompleted_bookings_by_customer_id(self, customer_id: int):
+        """
+        Returns a list of uncompleted bookings for a specific customer by their id.
+        """
+        query = """
+        SELECT * FROM BookingService
+        WHERE completed = 0 AND booking_id IN (
+            SELECT id FROM Booking WHERE customer_id = ?
+        )
+        """
+        self.cursor.execute(query, (customer_id,))
+        rows = self.cursor.fetchall()
+        return [BookingServiceModel(*row) for row in rows] if rows else []
+
+    def search_customers(self, search_term: str) -> list[CustomerModel]:
+        """
+        Searches for customers by first name, last name, email, or phone number.
+        Returns a list of CustomerModel objects that match the search term.
+        """
+        query = """
+        SELECT * FROM Customer
+        WHERE first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR phone_number LIKE ?
+        """
+        search_pattern = f"%{search_term}%"
+        self.cursor.execute(
+            query,
+            (search_pattern, search_pattern, search_pattern, search_pattern),
+        )
+        rows = self.cursor.fetchall()
+        return [CustomerModel(*row) for row in rows] if rows else []
+
+    def search_properties(self, search_term: str) -> list[PropertyModel]:
+        """
+        Searches for properties by street number, street name, city, or post code.
+        Returns a list of PropertyModel objects that match the search term.
+        """
+        query = """
+        SELECT * FROM Property
+        WHERE street_number LIKE ? OR street_name LIKE ? OR city LIKE ? OR post_code LIKE ?
+        """
+        search_pattern = f"%{search_term}%"
+        self.cursor.execute(
+            query,
+            (search_pattern, search_pattern, search_pattern, search_pattern),
+        )
+        rows = self.cursor.fetchall()
+        return [PropertyModel(*row) for row in rows] if rows else []

@@ -78,6 +78,7 @@ class TableUser:
 class TableView(ctk.CTkFrame):
     page_index: int = 1
     page_size: int = 10
+    cached_page_count: int = 0
 
     def __init__(
         self,
@@ -134,6 +135,14 @@ class TableView(ctk.CTkFrame):
         )
         self.next_button.grid(row=0, column=1, sticky="e", padx=5, pady=5)
 
+        self.get_page_count()
+
+        self.page_count_label = ctk.CTkLabel(
+            master=self.buttons_frame,
+            text=f"Page 1 of {self.cached_page_count}",
+        )
+        self.page_count_label.grid(row=0, column=2, sticky="e", padx=5, pady=5)
+
         self.grid_rowconfigure(0, weight=7)
         self.grid_rowconfigure(1, weight=1)
 
@@ -177,14 +186,18 @@ class TableView(ctk.CTkFrame):
             self.page_index -= 1
             self.load_data()
 
+            self.set_page_label_text()
+
     def next_page(self):
-        max_pages = self.user.get_max_pages(self.page_size)
+        max_pages = self.get_page_count()
         if self.page_index < max_pages:
             self.page_index += 1
             self.load_data()
 
+            self.set_page_label_text()
+
     def load_data(self):
-        max_pages = self.user.get_max_pages(self.page_size)
+        max_pages = self.get_page_count()
 
         self.page_index = min(self.page_index, max_pages)
         self.page_index = max(self.page_index, 1)
@@ -196,3 +209,14 @@ class TableView(ctk.CTkFrame):
         self.treeview.delete(*self.treeview.get_children())
         for index, item in enumerate(data):
             self.treeview.insert("", str(index), values=item.to_list())
+
+        self.set_page_label_text()
+
+    def get_page_count(self):
+        self.cached_page_count = self.user.get_max_pages(self.page_size)
+        return self.cached_page_count
+
+    def set_page_label_text(self):
+        self.page_count_label.configure(
+            text=f"Page {self.page_index} of {self.cached_page_count}"
+        )
