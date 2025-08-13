@@ -36,9 +36,6 @@ CREATE TABLE IF NOT EXISTS Service (
 CREATE TABLE IF NOT EXISTS BookingService (
     booking_id INTEGER NOT NULL,
     service_id INTEGER NOT NULL,
-    duration INTEGER NOT NULL, -- duration in minutes
-    additional_cost DECIMAL(10, 2) NOT NULL,
-    notes TEXT,
     completed BOOLEAN NOT NULL DEFAULT 0,
     PRIMARY KEY (booking_id, service_id),
     FOREIGN KEY (booking_id) REFERENCES Booking(id),

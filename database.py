@@ -1,3 +1,4 @@
+from enum import Enum
 import sqlite3
 from datetime import datetime
 from dataclasses import dataclass
@@ -6,6 +7,11 @@ from util import Signal
 
 
 # -1 id means transient object
+
+
+class Access(Enum):
+    READ = "read"
+    WRITE = "write"
 
 
 @dataclass
@@ -142,16 +148,17 @@ class ServiceModel:
         """
         Returns a nicely formatted string representation of the service.
         """
+        self.assure()
         return f"Service {self.id}: {self.name} at base price ${self.base_price:.2f}"
+
+    def __hash__(self):
+        return hash(self.id)
 
 
 @dataclass
 class BookingServiceModel:
     booking_id: int
     service_id: int
-    duration: int
-    additional_cost: float
-    notes: str
     completed: bool
 
     def is_transient(self) -> bool:
@@ -161,25 +168,44 @@ class BookingServiceModel:
         return [
             self.booking_id,
             self.service_id,
-            self.duration,
-            self.additional_cost,
-            self.notes,
             self.completed,
         ]
 
     def assure(self):
         self.booking_id = int(self.booking_id)
         self.service_id = int(self.service_id)
-        self.duration = int(self.duration)
-        if isinstance(self.additional_cost, str):
-            try:
-                self.additional_cost = float(self.additional_cost)
-            except ValueError:
-                self.additional_cost = 0.0
-        if isinstance(self.notes, str):
-            self.notes = self.notes.strip()
         if not isinstance(self.completed, bool):
             self.completed = bool(self.completed)
+
+
+@dataclass
+class PaymentModel:
+    id: int
+    booking_id: int
+    amount: float
+    payment_date: datetime
+
+    def is_transient(self) -> bool:
+        return self.id == -1 or self.booking_id == -1
+
+    def to_list(self) -> list:
+        payment_date_str = (
+            self.payment_date.strftime("%Y-%m-%d %H:%M:%S")
+            if isinstance(self.payment_date, datetime)
+            else self.payment_date
+        )
+        return [self.id, self.booking_id, self.amount, payment_date_str]
+
+    def assure(self):
+        self.id = int(self.id)
+        self.booking_id = int(self.booking_id)
+        if isinstance(self.amount, str):
+            try:
+                self.amount = float(self.amount)
+            except ValueError:
+                self.amount = 0.0
+        if isinstance(self.payment_date, str):
+            self.payment_date = datetime.fromisoformat(self.payment_date)
 
 
 class Database:
@@ -188,6 +214,7 @@ class Database:
     bookings_changed: Signal
     services_changed: Signal
     booking_services_changed: Signal
+    payments_changed: Signal
 
     last_error: str = ""
 
@@ -199,9 +226,11 @@ class Database:
         self.bookings_changed = Signal()
         self.services_changed = Signal()
         self.booking_services_changed = Signal()
+        self.payments_changed = Signal()
         self.last_error = ""
 
         self.cursor.execute("PRAGMA foreign_keys = ON")
+        # self.connection.set_trace_callback(print)
 
         self.create_tables()
 
@@ -488,7 +517,6 @@ class Database:
         Returns a property by id or None if not found.
         """
         query = "SELECT * FROM Property WHERE id = ?"
-        print(property_id)
         self.cursor.execute(query, (property_id,))
         row = self.cursor.fetchone()
         if row:
@@ -643,10 +671,25 @@ class Database:
         If the model has an id of -1, it is considered transient and will be assigned a new id.
         Otherwise, it will return False. If successful, the model's id will be updated.
         """
-        if model.is_transient():
-            return self.add_service(model)
-        else:
-            return self.update_service(model)
+        if not model.is_transient():
+            return False
+        query = """
+        INSERT INTO Service (name, base_price)
+        VALUES (?, ?)
+        """
+        try:
+            self.cursor.execute(query, (model.name, model.base_price))
+        except sqlite3.IntegrityError as e:
+            self.last_error = str(e)
+            return False
+        self.connection.commit()
+        model.id = self.cursor.lastrowid
+
+        success = model.id != -1
+        if success:
+            self.services_changed.emit()
+
+        return success
 
     def update_service(self, model: ServiceModel) -> bool:
         """
@@ -745,14 +788,14 @@ class Database:
     def add_booking_service(self, model: BookingServiceModel) -> bool:
         """
         Adds a booking service to the database and returns True if successful, False otherwise.
-        If the model has a booking_id or service_id of -1, it is considered transient and will be assigned a new id.
-        Otherwise, it will return False. If successful, the model's booking_id and service_id will be updated.
+        If the model has a booking_id or service_id of -1, it is considered transient and will not be added.
+        It will return False. If successful, the model's booking_id will be updated
         """
-        if not model.is_transient():
+        if model.is_transient():
             return False
         query = """
-        INSERT INTO BookingService (booking_id, service_id, duration, additional_cost, notes, completed)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO BookingService (booking_id, service_id, completed)
+        VALUES (?, ?, ?)
         """
         try:
             self.cursor.execute(
@@ -760,20 +803,22 @@ class Database:
                 (
                     model.booking_id,
                     model.service_id,
-                    model.duration,
-                    model.additional_cost,
-                    model.notes,
                     model.completed,
                 ),
             )
         except sqlite3.IntegrityError as e:
             self.last_error = str(e)
             return False
+        except sqlite3.DatabaseError as e:
+            self.last_error = str(e)
+            return False
+        model.booking_id = self.cursor.lastrowid
         self.connection.commit()
 
         success = model.booking_id != -1 and model.service_id != -1
         if success:
             self.booking_services_changed.emit()
+            self.bookings_changed.emit()
 
         return success
 
@@ -795,6 +840,19 @@ class Database:
         self.cursor.execute(query)
         total_booking_services = self.cursor.fetchone()[0]
         return (total_booking_services + page_size - 1) // page_size
+
+    def remove_booking_service_in_booking(self, booking_id: int) -> bool:
+        """
+        Removes all booking services for a specific booking by its id and returns True if successful, False otherwise.
+        """
+        query = "DELETE FROM BookingService WHERE booking_id = ?"
+        self.cursor.execute(query, (booking_id,))
+        self.connection.commit()
+
+        success = self.cursor.rowcount > 0
+        if success:
+            self.booking_services_changed.emit()
+        return success
 
     def remove_booking_service_by_booking_service_id(
         self, booking_id: int, service_id: int
@@ -840,12 +898,9 @@ class Database:
         Returns True if successful, False otherwise.
         """
         query = """
-        INSERT INTO BookingService (booking_id, service_id, duration, additional_cost, notes, completed)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO BookingService (booking_id, service_id, completed)
+        VALUES (?, ?, ?)
         ON CONFLICT(booking_id, service_id) DO UPDATE SET
-            duration = excluded.duration,
-            additional_cost = excluded.additional_cost,
-            notes = excluded.notes,
             completed = excluded.completed
         """
         try:
@@ -854,9 +909,6 @@ class Database:
                 (
                     model.booking_id,
                     model.service_id,
-                    model.duration,
-                    model.additional_cost,
-                    model.notes,
                     model.completed,
                 ),
             )
@@ -868,8 +920,23 @@ class Database:
         success = self.cursor.rowcount > 0
         if success:
             self.booking_services_changed.emit()
+            self.bookings_changed.emit()
 
         return success
+
+    def toggle_booking_service_completion(
+        self, booking_id: int, service_id: int
+    ) -> bool:
+        """
+        Toggles the completion status of a booking service.
+        """
+        service = self.get_booking_service_by_booking_id_and_service_id(
+            booking_id, service_id
+        )
+        if service:
+            service.completed = not service.completed
+            return self.update_booking_service(service)
+        return False
 
     def get_booking_service_by_booking_id_and_service_id(
         self, booking_id: int, service_id: int
@@ -923,7 +990,7 @@ class Database:
         """
         Returns a list of all bookings that are not completed.
         """
-        query = "SELECT * FROM BookingService WHERE completed = 0"
+        query = "SELECT * FROM Booking WHERE id IN (SELECT booking_id FROM BookingService WHERE completed = 0)"
         self.cursor.execute(query)
         rows = self.cursor.fetchall()
         return [BookingServiceModel(*row) for row in rows] if rows else []
@@ -934,15 +1001,206 @@ class Database:
         """
         query = """
         SELECT * FROM BookingService
-        WHERE completed = 0 AND booking_id IN (
+        WHERE booking_id IN (
             SELECT id FROM Booking WHERE customer_id = ?
+        ) INNER JOIN Booking ON BookingService.booking_id = Booking.id
+        AND BookingService.completed = 0
         )
         """
         self.cursor.execute(query, (customer_id,))
         rows = self.cursor.fetchall()
         return [BookingServiceModel(*row) for row in rows] if rows else []
 
-    def search_customers(self, search_term: str) -> list[CustomerModel]:
+    def get_number_uncompleted_bookings(self) -> int:
+        """
+        Returns the number of uncompleted bookings in the database.
+        """
+        query = "SELECT COUNT(*) FROM Booking WHERE id IN (SELECT booking_id FROM BookingService WHERE completed = 0)"
+        self.cursor.execute(query)
+        return self.cursor.fetchone()[0]
+
+    def create_payment(self, model: PaymentModel) -> bool:
+        """
+        Creates a payment record in the database and returns True if successful, False otherwise.
+        If the model has an id of -1, it is considered transient and will be assigned a new id.
+        Otherwise, it will return False. If successful, the model's id will be updated.
+        """
+        if not model.is_transient():
+            return False
+        query = """
+        INSERT INTO Payment (booking_id, amount, payment_date)
+        VALUES (?, ?, ?)
+        """
+        try:
+            self.cursor.execute(
+                query, (model.booking_id, model.amount, model.payment_date)
+            )
+        except sqlite3.IntegrityError as e:
+            self.last_error = str(e)
+            return False
+        self.connection.commit()
+        model.id = self.cursor.lastrowid
+
+        success = model.id != -1
+        if success:
+            self.payments_changed.emit()
+        return success
+
+    def update_payment(self, model: PaymentModel) -> bool:
+        """
+        Updates an existing payment in the database.
+        Returns True if successful, False otherwise.
+        """
+        query = """
+        INSERT INTO Payment (id, booking_id, amount, payment_date)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            booking_id = excluded.booking_id,
+            amount = excluded.amount,
+            payment_date = excluded.payment_date
+        """
+        try:
+            self.cursor.execute(
+                query,
+                (model.id, model.booking_id, model.amount, model.payment_date),
+            )
+        except sqlite3.IntegrityError as e:
+            self.last_error = str(e)
+            return False
+        self.connection.commit()
+
+        success = self.cursor.rowcount > 0
+        if success:
+            self.payments_changed.emit()
+
+        return success
+
+    def add_or_update_payment(self, model: PaymentModel) -> bool:
+        """
+        Adds a new payment to the database or updates an existing one.
+        If the model has an id of -1, it is considered transient and will be assigned a new id.
+        Otherwise, it will update the existing payment with the same id.
+        Returns True if successful, False otherwise.
+        """
+        if model.is_transient():
+            return self.create_payment(model)
+        else:
+            return self.update_payment(model)
+
+    def get_payment_by_id(self, payment_id: int) -> PaymentModel | None:
+        """
+        Returns a payment by id or None if not found.
+        """
+        query = "SELECT * FROM Payment WHERE id = ?"
+        self.cursor.execute(query, (payment_id,))
+        row = self.cursor.fetchone()
+        if row:
+            return PaymentModel(*row)
+        return None
+
+    def get_payments_by_booking_id(self, booking_id: int):
+        """
+        Returns a list of payments for a specific booking by its id.
+        """
+        query = "SELECT * FROM Payment WHERE booking_id = ?"
+        self.cursor.execute(query, (booking_id,))
+        rows = self.cursor.fetchall()
+        return [PaymentModel(*row) for row in rows] if rows else []
+
+    def get_all_payments(self, page: int, page_size: int = 10):
+        """
+        Returns a list of all payments in the database, paginated.
+        """
+        offset = (page - 1) * page_size
+        query = "SELECT * FROM Payment LIMIT ? OFFSET ?"
+        self.cursor.execute(query, (page_size, offset))
+        rows = self.cursor.fetchall()
+        return [PaymentModel(*row) for row in rows]
+
+    def get_num_payment_pages(self, page_size: int = 10) -> int:
+        """
+        Returns the number of pages of payments in the database.
+        """
+        query = "SELECT COUNT(*) FROM Payment"
+        self.cursor.execute(query)
+        total_payments = self.cursor.fetchone()[0]
+        return (total_payments + page_size - 1) // page_size
+
+    def remove_payment_by_id(self, ids: list[int]) -> bool:
+        """
+        Removes a payment by id and returns True if successful, False otherwise.
+        """
+        query = "DELETE FROM Payment WHERE id IN ({})".format(
+            ",".join("?" for _ in ids)
+        )
+        self.cursor.execute(query, ids)
+        self.connection.commit()
+
+        success = self.cursor.rowcount > 0
+        if success:
+            self.payments_changed.emit()
+        return success
+
+    def remove_payment(self, model: PaymentModel) -> bool:
+        """
+        Removes a payment model from the database and returns True if successful and removes the id from the model, False otherwise.
+        """
+        if model.is_transient():
+            return False
+        success = self.remove_payment_by_id([model.id])
+        if success:
+            model.id = -1
+        return success
+
+    def get_payments_by_customer_id(self, customer_id: int):
+        """
+        Returns a list of payments for a specific customer by their id.
+        """
+        query = """
+        SELECT * FROM Payment
+        WHERE booking_id IN (
+            SELECT id FROM Booking WHERE customer_id = ?
+        )
+        """
+        self.cursor.execute(query, (customer_id,))
+        rows = self.cursor.fetchall()
+        return [PaymentModel(*row) for row in rows] if rows else []
+
+    def get_payments_by_property_id(self, property_id: int):
+        """
+        Returns a list of payments for a specific property by its id.
+        """
+        query = """
+        SELECT * FROM Payment
+        WHERE booking_id IN (
+            SELECT id FROM Booking WHERE property_id = ?
+        )
+        """
+        self.cursor.execute(query, (property_id,))
+        rows = self.cursor.fetchall()
+        return [PaymentModel(*row) for row in rows] if rows else []
+
+    def get_total_payments_for_booking(self, booking_id: int) -> float:
+        """
+        Returns the total amount of payments for a specific booking by its id.
+        """
+        query = "SELECT SUM(amount) FROM Payment WHERE booking_id = ?"
+        self.cursor.execute(query, (booking_id,))
+        result = self.cursor.fetchone()
+        return result[0] if result and result[0] is not None else 0.0
+
+    def get_count_payments_for_booking(self, booking_id: int) -> int:
+        """
+        Returns the count of payments for a specific booking by its id.
+        """
+        query = "SELECT COUNT(*) FROM Payment WHERE booking_id = ?"
+        self.cursor.execute(query, (booking_id,))
+        result = self.cursor.fetchone()
+        return result[0] if result else 0
+
+    def search_customers(
+        self, search_term: str, limit: int = 10
+    ) -> list[CustomerModel]:
         """
         Searches for customers by first name, last name, email, or phone number.
         Returns a list of CustomerModel objects that match the search term.
@@ -950,16 +1208,19 @@ class Database:
         query = """
         SELECT * FROM Customer
         WHERE first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR phone_number LIKE ?
+        LIMIT ?
         """
         search_pattern = f"%{search_term}%"
         self.cursor.execute(
             query,
-            (search_pattern, search_pattern, search_pattern, search_pattern),
+            (search_pattern, search_pattern, search_pattern, search_pattern, limit),
         )
         rows = self.cursor.fetchall()
         return [CustomerModel(*row) for row in rows] if rows else []
 
-    def search_properties(self, search_term: str) -> list[PropertyModel]:
+    def search_properties(
+        self, search_term: str, limit: int = 10
+    ) -> list[PropertyModel]:
         """
         Searches for properties by street number, street name, city, or post code.
         Returns a list of PropertyModel objects that match the search term.
@@ -967,11 +1228,116 @@ class Database:
         query = """
         SELECT * FROM Property
         WHERE street_number LIKE ? OR street_name LIKE ? OR city LIKE ? OR post_code LIKE ?
+        LIMIT ?
         """
         search_pattern = f"%{search_term}%"
         self.cursor.execute(
             query,
-            (search_pattern, search_pattern, search_pattern, search_pattern),
+            (search_pattern, search_pattern, search_pattern, search_pattern, limit),
         )
         rows = self.cursor.fetchall()
         return [PropertyModel(*row) for row in rows] if rows else []
+
+    def search_bookings(self, search_term: str, limit: int = 10) -> list[BookingModel]:
+        """
+        Searches for bookings by customer id or property id.
+        Returns a list of BookingModel objects that match the search term.
+        """
+        query = """
+        SELECT * FROM Booking
+        WHERE customer_id IN (
+            SELECT id FROM Customer WHERE first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR phone_number LIKE ?
+        ) OR property_id IN (
+            SELECT id FROM Property WHERE street_number LIKE ? OR street_name LIKE ? OR city LIKE ? OR post_code LIKE ?
+        )
+        LIMIT ?
+        """
+        search_pattern = f"%{search_term}%"
+        self.cursor.execute(
+            query,
+            (
+                search_pattern,
+                search_pattern,
+                search_pattern,
+                search_pattern,
+                search_pattern,
+                search_pattern,
+                search_pattern,
+                search_pattern,
+                limit,
+            ),
+        )
+        rows = self.cursor.fetchall()
+        return [BookingModel(*row) for row in rows] if rows else []
+
+    def search_services(self, search_term: str, limit: int = 10) -> list[ServiceModel]:
+        """
+        Searches for services by name.
+        Returns a list of ServiceModel objects that match the search term.
+        """
+        query = "SELECT * FROM Service WHERE name LIKE ? LIMIT ?"
+        search_pattern = f"%{search_term}%"
+        self.cursor.execute(query, (search_pattern, limit))
+        rows = self.cursor.fetchall()
+        return [ServiceModel(*row) for row in rows] if rows else []
+
+    def get_booking_cost(self, booking_id: int) -> float:
+        """
+        Returns the total cost of a booking by its id.
+        """
+        query = """
+        SELECT SUM(s.base_price) FROM BookingService bs
+        INNER JOIN Service s ON bs.service_id = s.id
+        WHERE bs.booking_id = ? AND bs.completed = 1
+        """
+        self.cursor.execute(query, (booking_id,))
+        result = self.cursor.fetchone()
+        return result[0] if result and result[0] is not None else 0.0
+
+    def get_booking_total_cost(self, booking_id: int) -> float:
+        """
+        Returns the total cost of a booking by its id, including all services, regardless of completion status.
+        """
+        query = """
+        SELECT SUM(s.base_price) FROM BookingService bs
+        INNER JOIN Service s ON bs.service_id = s.id
+        WHERE bs.booking_id = ?
+        """
+        self.cursor.execute(query, (booking_id,))
+        result = self.cursor.fetchone()
+        return result[0] if result and result[0] is not None else 0.0
+
+    def is_booking_completed(self, booking_id: int) -> bool:
+        """
+        Checks if a booking is completed by its id.
+        """
+        query = """
+        SELECT COUNT(*) FROM Booking WHERE id = ? AND id NOT IN (
+            SELECT booking_id from BookingService WHERE completed = 0
+        )
+        """
+        self.cursor.execute(query, (booking_id,))
+        result = self.cursor.fetchone()
+        return result[0] > 0
+
+    def booking_has_pending_payments(self, booking_id: int) -> bool:
+        """
+        Checks if a booking has any pending payments.
+        """
+        query = """
+        SELECT payment_summary.total, service_summary.total FROM Booking
+        /* get the paid amount, could be null if there's no payments */
+        LEFT JOIN (
+            SELECT SUM(amount) AS total FROM Payment WHERE booking_id = :booking_id
+        ) AS payment_summary ON Booking.id = :booking_id
+        /* get the owed total cost, shouldn't be null as at least one service should be on a booking */
+        LEFT JOIN (
+            SELECT SUM(base_price) AS total FROM BookingService INNER JOIN
+            Service ON BookingService.service_id = Service.id WHERE booking_id = :booking_id
+        ) AS service_summary ON Booking.id = :booking_id
+        /* now only choose the bookings with pending payments */
+        WHERE Booking.id = :booking_id AND COALESCE(payment_summary.total, 0) != COALESCE(service_summary.total, 0)
+        """
+        self.cursor.execute(query, {"booking_id": booking_id})
+        result = self.cursor.fetchone()
+        return result is not None and result[0] != result[1]

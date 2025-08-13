@@ -2,19 +2,11 @@ import customtkinter as ctk
 import tkinter as tk
 import tkinter.ttk as ttk
 
+from app import State
 
-class ErrorDialog(ctk.CTkToplevel):
-    def __init__(self, message: str, master=None):
-        super().__init__(master)
-        self.title("Error")
-        self.geometry("300x150")
-        self.maxsize(600, 300)
+import dateparser
 
-        self.label = ctk.CTkLabel(master=self, text=message)
-        self.label.pack(pady=20)
-
-        self.ok_button = ctk.CTkButton(master=self, text="OK", command=self.destroy)
-        self.ok_button.pack(pady=10)
+from database import Access
 
 
 class ModelEditor(ctk.CTkToplevel):
@@ -26,7 +18,7 @@ class ModelEditor(ctk.CTkToplevel):
         self.geometry("400x300")
 
         # disable close button
-        self.protocol("WM_DELETE_WINDOW", lambda: self.save_model())
+        self.protocol("WM_DELETE_WINDOW", lambda: None)
 
         # Create UI elements to edit the model
         self.label = ctk.CTkLabel(
@@ -83,6 +75,7 @@ class TableView(ctk.CTkFrame):
     def __init__(
         self,
         user: TableUser,
+        access: Access = Access.WRITE,
         master=None,
         columns=None,
         **kwargs,
@@ -117,7 +110,8 @@ class TableView(ctk.CTkFrame):
             self.treeview.column(col, anchor="center")
         self.treeview.pack(expand=True, fill="both")
         self.treeview.bind("<Double-1>", self.on_double_click)
-        self.treeview.bind("<Button-3>", self.on_right_click)
+        if access == Access.WRITE:
+            self.treeview.bind("<Button-3>", self.on_right_click)
 
         self.buttons_frame = ctk.CTkFrame(self)
         self.buttons_frame.pack(expand=False, fill="x", pady=5)
@@ -220,3 +214,126 @@ class TableView(ctk.CTkFrame):
         self.page_count_label.configure(
             text=f"Page {self.page_index} of {self.cached_page_count}"
         )
+
+
+empty_ordering_function = lambda x: 1
+custom_colour_function = lambda x: None
+
+
+class SearchbarWithCompletion(ctk.CTkFrame):
+    def __init__(
+        self,
+        title,
+        search_fn,
+        on_choose,
+        order=empty_ordering_function,
+        colour_fn=custom_colour_function,
+        master=None,
+    ):
+        super().__init__(master)
+        self.title = title
+        self.search_fn = search_fn
+        self.on_choose = on_choose
+        self.order = order
+        self.colour_fn = colour_fn
+
+        self.selected_label = ctk.CTkEntry(
+            master=self, placeholder_text=f"Selected {self.title}"
+        )
+        self.selected_label.configure(state="readonly")
+        self.selected_label.pack(pady=5, fill="x", padx=10)
+        self.selected = None
+
+        self.search_entry = ctk.CTkEntry(master=self, placeholder_text="Search")
+        self.search_entry.pack(expand=True, fill="x", padx=10, pady=10)
+
+        self.options = ctk.CTkScrollableFrame(self)
+        self.options.pack(expand=True, fill="both", padx=10, pady=10)
+
+        # as the user types, we will show the results in this frame
+        self.search_entry.bind("<KeyRelease>", self.on_search)
+
+        self.on_search()
+
+    def on_search(self, event=None):
+        search_text = self.search_entry.get().strip()
+        results = self.search_fn(search_text)
+        results = sorted(results, key=self.order)
+        self.update_options(results)
+
+    def choose(self, i):
+        self.selected_label.configure(state="normal")
+        self.selected_label.delete(0, "end")
+        self.selected_label.insert(0, str(i))
+        self.selected = i
+        self.selected_label.configure(state="readonly")
+        self.on_choose(i)
+
+    def update_options(self, results):
+        for widget in self.options.winfo_children():
+            widget.destroy()
+
+        for item in results:
+            option_button = ctk.CTkButton(
+                master=self.options,
+                text=str(item),
+                command=lambda i=item: self.choose(i),
+            )
+            option_button.pack(fill="x", padx=5, pady=2)
+            if self.colour_fn:
+                colour = self.colour_fn(item)
+                if colour:
+                    option_button.configure(fg_color=colour)
+
+    def clear_selection(self):
+        self.selected_label.configure(state="normal")
+        self.selected_label.delete(0, "end")
+        self.selected_label.configure(state="readonly")
+        self.selected = None
+
+        self.search_entry.delete(0, "end")
+
+
+class DatetimeValidatedEntry(ctk.CTkFrame):
+    def __init__(self, master=None, placeholder_text="Enter date and time"):
+        super().__init__(master)
+
+        self.entry = ctk.CTkEntry(
+            master=self, placeholder_text=placeholder_text, fg_color="transparent"
+        )
+        self.entry.pack(expand=True, fill="x", padx=10, pady=10)
+
+        self.entry.bind("<FocusOut>", self.validate_datetime)
+        self.entry.bind("<Return>", self.validate_datetime)
+        self.entry.bind("<KeyRelease>", self.validate_datetime)
+        self.valid_time = None
+        self.original_fg_color = self.entry.cget("fg_color")
+
+        self.calculated_datetime = ctk.CTkLabel(
+            master=self, text="Calculated DateTime will appear here"
+        )
+        self.calculated_datetime.pack(pady=5)
+
+    def parse_datetime(self, s):
+        try:
+            return dateparser.parse(s, settings={"PREFER_DATES_FROM": "future"})
+        except ValueError:
+            return None
+
+    def validate_datetime(self, event=None):
+        got = self.parse_datetime(self.entry.get())
+        if got is None:
+            self.valid_time = None
+            self.configure(fg_color="red")
+            self.calculated_datetime.configure(text="Invalid DateTime")
+        else:
+            self.valid_time = got
+            self.configure(fg_color=self.original_fg_color)
+            self.calculated_datetime.configure(
+                text=f"Calculated DateTime: {got.strftime('%Y-%m-%d %H:%M')}"
+            )
+
+    def clear(self):
+        self.configure(fg_color=self.original_fg_color)
+        self.entry.delete(0, "end")
+        self.valid_time = None
