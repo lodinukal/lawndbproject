@@ -7,6 +7,7 @@ from app import State
 import dateparser
 
 from database import Access
+from util import Signal
 
 
 class ModelEditor(ctk.CTkToplevel):
@@ -337,3 +338,41 @@ class DatetimeValidatedEntry(ctk.CTkFrame):
         self.configure(fg_color=self.original_fg_color)
         self.entry.delete(0, "end")
         self.valid_time = None
+
+
+class DateTimeRangeEntry(ctk.CTkFrame):
+    def __init__(self, master=None, placeholder_text="Enter date and time range"):
+        super().__init__(master)
+
+        self.signal = Signal()
+
+        self.start_entry = DatetimeValidatedEntry(
+            master=self, placeholder_text="Start DateTime"
+        )
+        self.start_entry.pack(expand=True, fill="x", padx=10, pady=5)
+
+        self.end_entry = DatetimeValidatedEntry(
+            master=self, placeholder_text="End DateTime"
+        )
+        self.end_entry.pack(expand=True, fill="x", padx=10, pady=5)
+
+        self.valid_range = None
+        self.start_entry.entry.bind("<FocusOut>", self.validate_range)
+        self.start_entry.entry.bind("<Return>", self.validate_range)
+        self.end_entry.entry.bind("<FocusOut>", self.validate_range)
+        self.end_entry.entry.bind("<Return>", self.validate_range)
+
+    def validate_range(self, _):
+        if not self.start_entry.valid_time or not self.end_entry.valid_time:
+            self.valid_range = None
+            self.signal.emit()
+            return False
+
+        if self.start_entry.valid_time >= self.end_entry.valid_time:
+            self.valid_range = None
+            self.signal.emit()
+            return False
+
+        self.valid_range = (self.start_entry.valid_time, self.end_entry.valid_time)
+        self.signal.emit()
+        return True

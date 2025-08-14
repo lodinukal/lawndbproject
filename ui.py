@@ -17,6 +17,7 @@ from database import (
 )
 
 from ui_base import (
+    DateTimeRangeEntry,
     DatetimeValidatedEntry,
     ModelEditor,
     SearchbarWithCompletion,
@@ -769,12 +770,12 @@ class BookingManager(ctk.CTkFrame):
             text=f"Services: {completed_services}/{total_services}"
         )
 
-        total_paid = self.ui_state.app_state.database.get_total_payments_for_booking(
-            self.current_booking.id
+        total_paid, total_price = (
+            self.ui_state.app_state.database.booking_get_paid_total_cost(
+                self.current_booking.id
+            )
         )
-        total_price = self.ui_state.app_state.database.get_booking_total_cost(
-            self.current_booking.id
-        )
+
         self.booking_price_text.configure(
             text=f"Total Price: ${total_price:.2f}, Total Paid: ${total_paid:.2f}"
         )
@@ -911,15 +912,28 @@ class CreatePaymentForm(ctk.CTkFrame):
         super().__init__(master)
         self.ui_state = ui_state
 
+        self.time_range = DateTimeRangeEntry(
+            master=self,
+        )
+        self.time_range.pack(pady=5, expand=True, fill="x")
+
         self.booking_search = SearchbarWithCompletion(
             title="Booking",
             search_fn=self.search_bookings,
             on_choose=self.on_booking_choose,
+            colour_fn=self.colour_fn,
             master=self,
         )
-        self.booking_search.pack(pady=5)
+        self.booking_search.pack(pady=5, expand=True, fill="x")
 
-        self.amount_entry = ctk.CTkEntry(master=self, placeholder_text="Amount")
+        self.time_range.signal.connect(lambda: self.booking_search.on_search())
+
+        self.remaining_amount_label = ctk.CTkLabel(master=self, text="")
+        self.remaining_amount_label.pack(pady=5)
+
+        self.amount_entry = ctk.CTkEntry(
+            master=self, placeholder_text="Payment amount ($)"
+        )
         self.amount_entry.pack(pady=5)
 
         self.submit_button = ctk.CTkButton(
@@ -927,17 +941,39 @@ class CreatePaymentForm(ctk.CTkFrame):
         )
         self.submit_button.pack(pady=5)
 
+        self.valid_payment_amount = 0
+
+    def colour_fn(self, booking_model: BookingModel):
+        if self.ui_state.app_state.database.is_booking_completed(booking_model.id):
+            if self.ui_state.app_state.database.booking_has_pending_payments(
+                booking_model.id
+            ):
+                return "orange"
+            return "green"
+        return "red"
+
     def search_bookings(self, query: str):
         """
         Searches for bookings based on the query and returns a list of booking models.
         """
-        bookings = self.ui_state.app_state.database.search_bookings(query)
+        bookings = self.ui_state.app_state.database.search_bookings(
+            query, time=self.time_range.valid_range
+        )
         for booking in bookings:
             booking.assure()
         return bookings
 
-    def on_booking_choose(self, booking_name):
-        pass
+    def on_booking_choose(self, booking_model: BookingModel):
+        total_paid, total_price = (
+            self.ui_state.app_state.database.booking_get_paid_total_cost(
+                booking_model.id
+            )
+        )
+        self.valid_payment_amount = total_price - total_paid
+
+        self.remaining_amount_label.configure(
+            text=f"$ {round(total_paid)}/{round(total_price)}, max payment: $ {round(self.valid_payment_amount)}"
+        )
 
     def submit(self):
         booking_model: BookingModel = self.booking_search.selected
@@ -951,6 +987,10 @@ class CreatePaymentForm(ctk.CTkFrame):
             amount = float(amount)
             if amount <= 0:
                 raise ValueError("Amount must be greater than zero.")
+            elif amount > self.valid_payment_amount:
+                raise ValueError(
+                    f"Amount exceeds the maximum allowed payment of ${self.valid_payment_amount}."
+                )
         except ValueError:
             self.ui_state.err("Amount must be a valid number.")
             return
@@ -972,6 +1012,9 @@ class CreatePaymentForm(ctk.CTkFrame):
     def clear_fields(self):
         self.booking_search.clear_selection()
         self.amount_entry.delete(0, "end")
+
+        self.remaining_amount_label.configure(text="")
+        self.valid_payment_amount = 0
 
 
 class PaymentTabView(ctk.CTkTabview):

@@ -2,6 +2,7 @@ from enum import Enum
 import sqlite3
 from datetime import datetime
 from dataclasses import dataclass
+from typing import Tuple
 
 from util import Signal
 
@@ -1238,34 +1239,38 @@ class Database:
         rows = self.cursor.fetchall()
         return [PropertyModel(*row) for row in rows] if rows else []
 
-    def search_bookings(self, search_term: str, limit: int = 10) -> list[BookingModel]:
+    def search_bookings(
+        self, search_term: str, limit: int = 10, time: Tuple[datetime] = (None, None)
+    ) -> list[BookingModel]:
         """
         Searches for bookings by customer id or property id.
         Returns a list of BookingModel objects that match the search term.
         """
+        start_time = (
+            str(time[0]) if time != None and time[0] != None else "1970-01-01 00:00:00"
+        )
+        end_time = (
+            str(time[1]) if time != None and time[1] != None else "9999-12-31 23:59:59"
+        )
         query = """
         SELECT * FROM Booking
-        WHERE customer_id IN (
-            SELECT id FROM Customer WHERE first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR phone_number LIKE ?
+        WHERE (customer_id IN (
+            SELECT id FROM Customer WHERE first_name LIKE :pattern OR last_name LIKE :pattern OR email LIKE :pattern OR phone_number LIKE :pattern
         ) OR property_id IN (
-            SELECT id FROM Property WHERE street_number LIKE ? OR street_name LIKE ? OR city LIKE ? OR post_code LIKE ?
-        )
-        LIMIT ?
+            SELECT id FROM Property WHERE street_number LIKE :pattern OR street_name LIKE :pattern OR city LIKE :pattern OR post_code LIKE :pattern
+        ) OR date_time LIKE :pattern)
+        AND date_time BETWEEN :start AND :end
+        LIMIT :limit
         """
         search_pattern = f"%{search_term}%"
         self.cursor.execute(
             query,
-            (
-                search_pattern,
-                search_pattern,
-                search_pattern,
-                search_pattern,
-                search_pattern,
-                search_pattern,
-                search_pattern,
-                search_pattern,
-                limit,
-            ),
+            {
+                "pattern": search_pattern,
+                "start": start_time,
+                "end": end_time,
+                "limit": limit,
+            },
         )
         rows = self.cursor.fetchall()
         return [BookingModel(*row) for row in rows] if rows else []
@@ -1281,32 +1286,6 @@ class Database:
         rows = self.cursor.fetchall()
         return [ServiceModel(*row) for row in rows] if rows else []
 
-    def get_booking_cost(self, booking_id: int) -> float:
-        """
-        Returns the total cost of a booking by its id.
-        """
-        query = """
-        SELECT SUM(s.base_price) FROM BookingService bs
-        INNER JOIN Service s ON bs.service_id = s.id
-        WHERE bs.booking_id = ? AND bs.completed = 1
-        """
-        self.cursor.execute(query, (booking_id,))
-        result = self.cursor.fetchone()
-        return result[0] if result and result[0] is not None else 0.0
-
-    def get_booking_total_cost(self, booking_id: int) -> float:
-        """
-        Returns the total cost of a booking by its id, including all services, regardless of completion status.
-        """
-        query = """
-        SELECT SUM(s.base_price) FROM BookingService bs
-        INNER JOIN Service s ON bs.service_id = s.id
-        WHERE bs.booking_id = ?
-        """
-        self.cursor.execute(query, (booking_id,))
-        result = self.cursor.fetchone()
-        return result[0] if result and result[0] is not None else 0.0
-
     def is_booking_completed(self, booking_id: int) -> bool:
         """
         Checks if a booking is completed by its id.
@@ -1320,24 +1299,27 @@ class Database:
         result = self.cursor.fetchone()
         return result[0] > 0
 
+    def booking_get_paid_total_cost(self, booking_id: int) -> Tuple[float, float]:
+        query = """
+        /* make sure has number or 0 */
+        SELECT COALESCE(payment_summary.total, 0), COALESCE(service_summary.total, 0) FROM Booking
+        /* get the paid amount, could be null if there's no payments */
+        LEFT JOIN (
+            SELECT SUM(Payment.amount) AS total FROM Payment WHERE booking_id = :booking_id
+        ) AS payment_summary
+        /* get the owed total cost, shouldn't be null as at least one service should be on a booking */
+        LEFT JOIN (
+            SELECT SUM(base_price) AS total FROM BookingService LEFT JOIN
+            Service ON BookingService.service_id = Service.id WHERE BookingService.booking_id = :booking_id
+        ) AS service_summary
+        """
+        self.cursor.execute(query, {"booking_id": booking_id})
+        result = self.cursor.fetchone()
+        return result if result is not None else (0, 0)
+
     def booking_has_pending_payments(self, booking_id: int) -> bool:
         """
         Checks if a booking has any pending payments.
         """
-        query = """
-        SELECT payment_summary.total, service_summary.total FROM Booking
-        /* get the paid amount, could be null if there's no payments */
-        LEFT JOIN (
-            SELECT SUM(amount) AS total FROM Payment WHERE booking_id = :booking_id
-        ) AS payment_summary ON Booking.id = :booking_id
-        /* get the owed total cost, shouldn't be null as at least one service should be on a booking */
-        LEFT JOIN (
-            SELECT SUM(base_price) AS total FROM BookingService INNER JOIN
-            Service ON BookingService.service_id = Service.id WHERE booking_id = :booking_id
-        ) AS service_summary ON Booking.id = :booking_id
-        /* now only choose the bookings with pending payments */
-        WHERE Booking.id = :booking_id AND COALESCE(payment_summary.total, 0) != COALESCE(service_summary.total, 0)
-        """
-        self.cursor.execute(query, {"booking_id": booking_id})
-        result = self.cursor.fetchone()
-        return result is not None and result[0] != result[1]
+        paid, total = self.booking_get_paid_total_cost(booking_id)
+        return paid < total
