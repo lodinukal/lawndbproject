@@ -1,1100 +1,909 @@
-# simple tkinter ui to interact with the app
-from datetime import datetime
-import customtkinter as ctk
-
+# PySide6 UI to interact with the app
+from datetime import date
+import inspect
+from types import GenericAlias
 from typing import Callable, Any
-
-from app import State
-from custom_notifications.notification_type import NotifyType
-from database import (
-    Access,
-    BookingModel,
-    BookingServiceModel,
-    CustomerModel,
-    PaymentModel,
-    PropertyModel,
-    ServiceModel,
+import typing
+from PySide6.QtWidgets import (
+    QMainWindow,
+    QWidget,
+    QPushButton,
+    QLabel,
+    QVBoxLayout,
+    QHBoxLayout,
+    QTabWidget,
+    QLineEdit,
+    QScrollArea,
+    QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QMenu,
+    QDialog,
+    QFormLayout,
+    QDialogButtonBox,
+    QListWidget,
+    QListWidgetItem,
+    QDateEdit,
+    QCheckBox,
+    QSpinBox,
+    QDoubleSpinBox,
 )
-
-from ui_base import (
-    DateTimeRangeEntry,
-    DatetimeValidatedEntry,
-    ModelEditor,
-    SearchbarWithCompletion,
-    TableUser,
-    TableView,
+from PySide6.QtGui import (
+    QIcon,
+    QFont,
+    QGuiApplication,
+    QAction,
+    QIntValidator,
+    QDoubleValidator,
 )
-from custom_notifications import NotificationManager
-from util import Signal
-
-ctk.set_appearance_mode("dark")
-
-
-class UIState:
-    app_state: State
-    notification_manager: NotificationManager
-
-    def err(self, message: str):
-        self.notification_manager.show_notification(
-            message=message, notify_type=NotifyType.ERROR
-        )
-
-    def info(self, message: str):
-        self.notification_manager.show_notification(
-            message=message, notify_type=NotifyType.INFO
-        )
-
-
-class DataTabInfo:
-    columns: list[str]
-    create_fake_function: None | Callable[[], None]
-    create_function: None | Callable[[], None]
-    dependent_signals: list[Signal]
-
-    gather_data: Callable[[int, int], list]
-    get_max_pages: Callable[[int], int]
-    delete_items: Callable[[list[int]], None]
-    create_editor: Callable[[Any | None], None]
-
-    access: Access
-
-    def __init__(self, access: Access = Access.WRITE):
-        self.access = access
-
-
-class DataTab(ctk.CTkScrollableFrame, TableUser):
-    def __init__(self, ui_state: UIState, info: DataTabInfo, master=None):
-        super().__init__(master)
-        self.ui_state = ui_state
-        self.info = info
-
-        self.table = TableView(
-            user=self,
-            master=self,
-            columns=self.info.columns,
-            access=self.info.access,
-        )
-        self.table.pack(expand=True, fill="both")
-
-        self.buttons_frame = ctk.CTkFrame(self)
-        self.buttons_frame.pack(expand=False, fill="x")
-
-        if (
-            self.info.create_fake_function is not None
-            and self.info.access == Access.WRITE
-        ):
-            self.fake_button = ctk.CTkButton(
-                master=self.buttons_frame,
-                text="Generate Fake",
-                command=self.add_fake_item,
-            )
-            self.fake_button.pack(pady=5)
-
-        if self.info.create_function is not None and self.info.access == Access.WRITE:
-            self.create_button = ctk.CTkButton(
-                master=self.buttons_frame,
-                text="Create",
-                command=self.create_item,
-            )
-            self.create_button.pack(pady=5)
-
-        for signal in self.info.dependent_signals:
-            signal.connect(self.on_data_updated)
-
-    def add_fake_item(self):
-        if self.info.create_fake_function is not None:
-            self.info.create_fake_function()
-        else:
-            self.ui_state.err("Failed to add item")
-
-    def create_item(self):
-        if self.info.create_function is not None:
-            self.info.create_function()
-        else:
-            self.ui_state.err("Failed to create item")
-
-    def on_data_updated(self):
-        self.table.load_data()
-
-    # table things
-    def gather_data(self, page_index: int, page_size: int = 10):
-        return self.info.gather_data(page_index, page_size)
-
-    def get_max_pages(self, page_size: int):
-        return self.info.get_max_pages(page_size)
-
-    def delete_items(self, selected: list[int]):
-        self.info.delete_items(selected)
-
-    def edit_item(self, item):
-        if self.info.create_editor(item) == False:
-            self.ui_state.err(f"Failed to edit item with id {item.id}.")
-
-
-class CustomerTab(DataTab):
-    def __init__(self, ui_state: UIState, master=None):
-        info = DataTabInfo()
-        info.columns = ["ID", "First Name", "Last Name", "Email", "Phone"]
-        info.create_fake_function = ui_state.app_state.add_fake_customer
-        info.create_function = lambda: self.create_customer_editor(None)
-        info.dependent_signals = [ui_state.app_state.database.customers_changed]
-        info.gather_data = ui_state.app_state.database.get_all_customers
-        info.get_max_pages = ui_state.app_state.database.get_num_customer_pages
-        info.delete_items = ui_state.app_state.database.remove_customer_by_id
-        info.create_editor = self.create_customer_editor
-        super().__init__(ui_state, info, master)
-
-    def create_customer_editor(self, id: int | None):
-        model = self.ui_state.app_state.database.get_customer_by_id(id) if id else None
-        new_model = (
-            model
-            if model
-            else CustomerModel(-1, "First name", "Last name", "Email", "Phone number")
-        )
-        editor = ModelEditor(
-            model=new_model,
-            on_complete=lambda m: self.ui_state.app_state.database.add_or_update_customer(
-                m
-            ),
-            master=self,
-        )
-
-
-class PropertyTab(DataTab):
-    def __init__(self, ui_state: UIState, master=None):
-        info = DataTabInfo()
-        info.columns = [
-            "ID",
-            "Street Number",
-            "Unit",
-            "Street Name",
-            "City",
-            "Post Code",
-        ]
-        info.create_fake_function = ui_state.app_state.add_fake_property
-        info.create_function = lambda: self.create_property_editor(None)
-        info.dependent_signals = [ui_state.app_state.database.properties_changed]
-        info.gather_data = ui_state.app_state.database.get_all_properties
-        info.get_max_pages = ui_state.app_state.database.get_num_property_pages
-        info.delete_items = ui_state.app_state.database.remove_property_by_id
-        info.create_editor = self.create_property_editor
-        super().__init__(ui_state, info, master)
-
-    def create_property_editor(self, id: int | None):
-        model = self.ui_state.app_state.database.get_property_by_id(id) if id else None
-        new_model = (
-            model
-            if model
-            else PropertyModel(-1, 0, "Street Name", "City", "Post Code", None)
-        )
-        editor = ModelEditor(
-            model=new_model,
-            on_complete=lambda m: self.ui_state.app_state.database.add_or_update_property(
-                m
-            ),
-            master=self,
-        )
-
-
-class BookingTab(DataTab):
-    def __init__(self, ui_state: UIState, master=None):
-        info = DataTabInfo()
-        info.columns = ["ID", "Customer ID", "Property ID", "When"]
-        info.create_fake_function = None
-        info.create_function = lambda: self.create_booking_editor(None)
-        info.dependent_signals = [ui_state.app_state.database.bookings_changed]
-        info.gather_data = ui_state.app_state.database.get_all_bookings
-        info.get_max_pages = ui_state.app_state.database.get_num_booking_pages
-        info.delete_items = ui_state.app_state.database.remove_booking_by_id
-        info.create_editor = self.create_booking_editor
-        super().__init__(ui_state, info, master)
-
-    def create_booking_editor(self, model_id: int | None):
-        model = (
-            self.ui_state.app_state.database.get_booking_by_id(model_id)
-            if model_id
-            else None
-        )
-        new_model = model if model else BookingModel(-1, -1, -1, datetime.now())
-        editor = ModelEditor(
-            model=new_model,
-            on_complete=lambda m: self.verify_update_booking(m),
-            master=self,
-        )
-
-    def verify_update_booking(self, model: BookingModel):
-        model.assure()
-        if self.ui_state.app_state.database.add_or_update_booking(model):
-            return True
-        self.ui_state.err(
-            f"Failed to set booking: {self.ui_state.app_state.database.last_error}"
-        )
-        return False
-
-
-class ServiceTab(DataTab):
-    def __init__(self, ui_state: UIState, access: Access = Access.WRITE, master=None):
-        info = DataTabInfo(access=access)
-        info.columns = ["ID", "Name", "Base Price"]
-        info.create_fake_function = None
-        info.create_function = lambda: self.create_service_editor(None)
-        info.dependent_signals = [ui_state.app_state.database.services_changed]
-        info.gather_data = ui_state.app_state.database.get_all_services
-        info.get_max_pages = ui_state.app_state.database.get_num_service_pages
-        info.delete_items = ui_state.app_state.database.remove_service_by_id
-        info.create_editor = self.create_service_editor
-        super().__init__(ui_state, info, master)
-
-    def create_service_editor(self, model_id: int | None):
-        model = (
-            self.ui_state.app_state.database.get_service_by_id(model_id)
-            if model_id
-            else None
-        )
-        new_model = model if model else ServiceModel(-1, "Service Name", 0.0)
-        editor = ModelEditor(
-            model=new_model,
-            on_complete=lambda m: self.ui_state.app_state.database.add_or_update_service(
-                m
-            ),
-            master=self,
-        )
-
-
-class PaymentTab(DataTab):
-    def __init__(self, ui_state: UIState, master=None):
-        info = DataTabInfo()
-        info.columns = ["ID", "Booking ID", "Amount", "Payment Date"]
-        info.create_fake_function = None
-        info.create_function = lambda: self.create_payment_editor(None)
-        info.dependent_signals = [ui_state.app_state.database.payments_changed]
-        info.gather_data = ui_state.app_state.database.get_all_payments
-        info.get_max_pages = ui_state.app_state.database.get_num_payment_pages
-        info.delete_items = ui_state.app_state.database.remove_payment_by_id
-        info.create_editor = self.create_payment_editor
-        super().__init__(ui_state, info, master)
-
-    def create_payment_editor(self, model_id: int | None):
-        model = (
-            self.ui_state.app_state.database.get_payment_by_id(model_id)
-            if model_id
-            else None
-        )
-        new_model = model if model else PaymentModel(-1, -1, 0.0, datetime.now())
-        editor = ModelEditor(
-            model=new_model,
-            on_complete=lambda m: self.ui_state.app_state.database.add_or_update_payment(
-                m
-            ),
-            master=self,
-        )
-
-
-class SettingsTab(ctk.CTkFrame):
-    def __init__(self, ui_state: UIState, master=None):
-        super().__init__(master)
-        self.ui_state = ui_state
-
-        reset_database_button = ctk.CTkButton(
-            master=self,
-            text="Reset Database",
-            command=lambda: self.ui_state.app_state.database.reset(),
-        )
-        reset_database_button.pack(pady=5)
-
-
-class DirectAccessTabView(ctk.CTkTabview):
-    def __init__(self, ui_state: UIState, master=None):
-        super().__init__(master)
-        self.ui_state = ui_state
-        self.add("Customers")
-        self.add("Properties")
-        self.add("Bookings")
-        self.add("Services")
-        self.add("Payments")
-        self.add("Settings")
-        self.set("Customers")  # Set the default tab
-
-        self.customers_tab = CustomerTab(
-            ui_state=self.ui_state, master=self.tab("Customers")
-        )
-        self.customers_tab.pack(expand=True, fill="both")
-
-        self.properties_tab = PropertyTab(
-            ui_state=self.ui_state, master=self.tab("Properties")
-        )
-        self.properties_tab.pack(expand=True, fill="both")
-
-        self.bookings_tab = BookingTab(
-            ui_state=self.ui_state, master=self.tab("Bookings")
-        )
-        self.bookings_tab.pack(expand=True, fill="both")
-
-        self.services_tab = ServiceTab(
-            ui_state=self.ui_state, master=self.tab("Services")
-        )
-        self.services_tab.pack(expand=True, fill="both")
-
-        self.payments_tab = PaymentTab(
-            ui_state=self.ui_state, master=self.tab("Payments")
-        )
-        self.payments_tab.pack(expand=True, fill="both")
-
-        self.settings_tab = SettingsTab(
-            ui_state=self.ui_state, master=self.tab("Settings")
-        )
-        self.settings_tab.pack(expand=True, fill="both")
-
-
-class CreateCustomerForm(ctk.CTkFrame):
-    def __init__(self, ui_state: UIState, master=None):
-        super().__init__(master)
-        self.ui_state = ui_state
-
-        self.first_name_entry = ctk.CTkEntry(master=self, placeholder_text="First Name")
-        self.first_name_entry.pack(pady=5)
-
-        self.last_name_entry = ctk.CTkEntry(master=self, placeholder_text="Last Name")
-        self.last_name_entry.pack(pady=5)
-
-        self.email_entry = ctk.CTkEntry(master=self, placeholder_text="Email")
-        self.email_entry.pack(pady=5)
-
-        self.phone_entry = ctk.CTkEntry(master=self, placeholder_text="Phone Number")
-        self.phone_entry.pack(pady=5)
-
-        self.submit_button = ctk.CTkButton(
-            master=self, text="Submit", command=self.submit
-        )
-        self.submit_button.pack(pady=5)
-
-    def submit(self):
-        first_name = self.first_name_entry.get()
-        last_name = self.last_name_entry.get()
-        email = self.email_entry.get()
-        phone = self.phone_entry.get()
-
-        if not (first_name and last_name and email and phone):
-            self.ui_state.err("All fields are required.")
-            return
-
-        customer_model = CustomerModel(-1, first_name, last_name, email, phone)
-        if self.ui_state.app_state.database.add_customer(customer_model):
-            self.ui_state.info("Customer created successfully.")
-            self.clear_fields()
-        else:
-            self.ui_state.err(
-                f"Failed to create customer: {self.ui_state.app_state.database.last_error}"
-            )
-
-    def clear_fields(self):
-        self.first_name_entry.delete(0, "end")
-        self.last_name_entry.delete(0, "end")
-        self.email_entry.delete(0, "end")
-        self.phone_entry.delete(0, "end")
-
-
-class CreatePropertyForm(ctk.CTkFrame):
-    def __init__(self, ui_state: UIState, master=None):
-        super().__init__(master)
-        self.ui_state = ui_state
-
-        self.street_number_entry = ctk.CTkEntry(
-            master=self, placeholder_text="Street Number"
-        )
-        self.street_number_entry.pack(pady=5)
-
-        self.unit_entry = ctk.CTkEntry(master=self, placeholder_text="Unit (optional)")
-        self.unit_entry.pack(pady=5)
-
-        self.street_name_entry = ctk.CTkEntry(
-            master=self, placeholder_text="Street Name"
-        )
-        self.street_name_entry.pack(pady=5)
-
-        self.city_entry = ctk.CTkEntry(master=self, placeholder_text="City")
-        self.city_entry.pack(pady=5)
-
-        self.post_code_entry = ctk.CTkEntry(master=self, placeholder_text="Post Code")
-        self.post_code_entry.pack(pady=5)
-
-        self.submit_button = ctk.CTkButton(
-            master=self, text="Submit", command=self.submit
-        )
-        self.submit_button.pack(pady=5)
-
-    def submit(self):
-        street_number = self.street_number_entry.get()
-        unit = self.unit_entry.get()
-        street_name = self.street_name_entry.get()
-        city = self.city_entry.get()
-        post_code = self.post_code_entry.get()
-
-        if not (street_number and street_name and city and post_code):
-            self.ui_state.err(
-                "Street Number, Street Name, City, and Post Code are required."
-            )
-            return
-
-        property_model = PropertyModel(
-            -1,
-            int(street_number),
-            unit if len(unit) > 0 else None,
-            street_name,
-            city,
-            post_code,
-        )
-        if self.ui_state.app_state.database.add_property(property_model):
-            self.ui_state.info("Property created successfully.")
-            self.clear_fields()
-        else:
-            self.ui_state.err(
-                f"Failed to create property: {self.ui_state.app_state.database.last_error}"
-            )
-
-    def clear_fields(self):
-        self.street_number_entry.delete(0, "end")
-        self.unit_entry.delete(0, "end")
-        self.street_name_entry.delete(0, "end")
-        self.city_entry.delete(0, "end")
-        self.post_code_entry.delete(0, "end")
-
-
-class CreateBookingForm(ctk.CTkScrollableFrame):
-    chosen_services: set[ServiceModel]
-
-    def __init__(self, ui_state: UIState, master=None):
-        super().__init__(master)
-        self.ui_state = ui_state
-
-        self.splitter = ctk.CTkFrame(master=self)
-
-        self.customer_search = SearchbarWithCompletion(
-            title="Customer",
-            search_fn=self.ui_state.app_state.database.search_customers,
-            on_choose=self.on_customer_choose,
-            master=self.splitter,
-        )
-        self.customer_search.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
-
-        self.property_search = SearchbarWithCompletion(
-            title="Property",
-            search_fn=self.ui_state.app_state.database.search_properties,
-            on_choose=self.on_property_choose,
-            master=self.splitter,
-        )
-        self.property_search.grid(row=0, column=1, sticky="ew", padx=10, pady=10)
-
-        self.services_frame = ctk.CTkFrame(master=self.splitter)
-        self.services_frame.grid(row=0, column=2, sticky="ew", padx=10, pady=10)
-
-        self.chosen_services = set([])
-        self.services_search = SearchbarWithCompletion(
-            title="Service",
-            search_fn=self.ui_state.app_state.database.search_services,
-            on_choose=self.on_service_choose,
-            master=self.services_frame,
-        )
-        self.services_search.pack(expand=True, fill="x", padx=10, pady=10)
-
-        self.splitter.pack(expand=True, fill="x", padx=10, pady=10)
-        self.splitter.columnconfigure(0, weight=1)
-        self.splitter.columnconfigure(1, weight=1)
-        self.splitter.columnconfigure(2, weight=1)
-
-        self.info_label = ctk.CTkLabel(
-            master=self,
-            text="Select a customer and property, then choose a date and time (YYYY-MM-DD HH:MM). Must be in the future.",
-        )
-
-        self.when_entry = DatetimeValidatedEntry(
-            master=self, placeholder_text="Datetime"
-        )
-        self.when_entry.pack(expand=True)
-
-        self.service_info_label = ctk.CTkLabel(
-            master=self,
-            text="Selected services:",
-        )
-        self.service_info_label.pack(pady=5)
-        self.services_list = ctk.CTkScrollableFrame(master=self)
-        self.services_list.pack(expand=True, fill="x")
-
-        self.submit_button = ctk.CTkButton(
-            master=self, text="Submit", command=self.submit
-        )
-        self.submit_button.pack(pady=5)
-
-    def on_customer_choose(self, customer_name):
-        pass
-
-    def on_property_choose(self, property_name):
-        pass
-
-    def on_service_choose(self, service_model: ServiceModel):
-        if service_model in self.chosen_services:
-            self.chosen_services.remove(service_model)
-        else:
-            self.chosen_services.add(service_model)
-        self.services_search.clear_selection()
-
-        self.update_selected_services()
-
-    def update_selected_services(self):
-        for widget in self.services_list.winfo_children():
-            widget.destroy()
-
-        for service in self.chosen_services:
-            service_label = ctk.CTkLabel(
-                master=self.services_list,
-                text=service.name,
-            )
-            service_label.pack(fill="x", padx=5, pady=2)
-
-    def submit(self):
-        customer_model: CustomerModel = self.customer_search.selected
-        property_model: PropertyModel = self.property_search.selected
-        when = self.when_entry.valid_time
-
-        if customer_model is None or property_model is None or when is None:
-            self.ui_state.err("All fields are required.")
-            return
-
-        # check if it's in the future
-        if when <= datetime.now():
-            self.ui_state.err("The date and time must be in the future.")
-            return
-
-        # check if it has at least one service
-        if len(self.chosen_services) == 0:
-            self.ui_state.err("At least one service must be selected.")
-            return
-
-        booking_model = BookingModel(-1, customer_model.id, property_model.id, when)
-        if self.ui_state.app_state.database.add_booking(booking_model):
-            self.ui_state.info("Booking created successfully.")
-            self.clear_fields()
-
-            # Add the services to the booking
-            for service in self.chosen_services:
-                booking_service_model = BookingServiceModel(
-                    booking_id=booking_model.id,
-                    service_id=service.id,
-                    completed=False,
-                )
-                if (
-                    self.ui_state.app_state.database.add_booking_service(
-                        booking_service_model
-                    )
-                    == False
-                ):
-                    self.ui_state.err(
-                        f"Failed to add service {service.name} to booking: {self.ui_state.app_state.database.last_error}"
-                    )
-        else:
-            self.ui_state.err(
-                f"Failed to create booking: {self.ui_state.app_state.database.last_error}"
-            )
-
-    def clear_fields(self):
-        self.customer_search.clear_selection()
-        self.property_search.clear_selection()
-        self.when_entry.clear()
-
-
-class BookingManager(ctk.CTkFrame):
-    # left hand scrolling search, right hand side with info about booking with list of services
-    def __init__(self, ui_state: UIState, master=None):
-        super().__init__(master)
-        self.ui_state = ui_state
-
-        self.search_bar = SearchbarWithCompletion(
-            title="Search Bookings",
-            search_fn=self.search_bookings,
-            on_choose=self.on_booking_choose,
-            colour_fn=self.colour_fn,
-            master=self,
-        )
-        self.search_bar.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-
-        self.booking_info_frame = ctk.CTkFrame(master=self)
-        self.booking_info_frame.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
-
-        self.topbar_booking_info = ctk.CTkFrame(master=self.booking_info_frame)
-        self.topbar_booking_info.pack(fill="x", padx=10, pady=10)
-
-        self.booking_name = ctk.CTkLabel(
-            master=self.topbar_booking_info, text="Unselected"
-        )
-        self.booking_name.pack(side="left", padx=10)
-
-        self.booking_delete_button = ctk.CTkButton(
-            master=self.topbar_booking_info,
-            text="Delete Booking",
-            command=lambda: self.remove_selected(),
-        )
-        self.booking_delete_button.pack(side="right", padx=10)
-
-        self.booking_services_completion_text = ctk.CTkLabel(
-            master=self.topbar_booking_info,
-            text="",
-        )
-        self.booking_services_completion_text.pack(side="right", padx=10)
-
-        self.booking_price_text = ctk.CTkLabel(
-            master=self.topbar_booking_info,
-            text="",
-        )
-        self.booking_price_text.pack(side="right", padx=10)
-
-        self.booking_description = ctk.CTkLabel(
-            master=self.booking_info_frame, text="Select a booking to see details."
-        )
-        self.booking_description.pack(pady=10)
-
-        self.booking_services_list = ctk.CTkScrollableFrame(
-            master=self.booking_info_frame
-        )
-        self.booking_services_list.pack(expand=True, fill="both", padx=10, pady=10)
-
-        self.current_booking = None
-
-        self.columnconfigure(0, weight=1)
-        self.columnconfigure(1, weight=5)
-
-        self.ui_state.app_state.database.bookings_changed.connect(
-            self.update_current_booking
-        )
-        self.ui_state.app_state.database.booking_services_changed.connect(
-            self.update_current_booking
-        )
-
-    def search_bookings(self, query: str):
-        """
-        Searches for bookings based on the query and returns a list of booking models.
-        """
-        bookings = self.ui_state.app_state.database.search_bookings(query)
-        for booking in bookings:
-            booking.assure()
-        return bookings
-
-    def on_booking_choose(self, booking_model: BookingModel):
-        self.current_booking = booking_model
-
-        self.update_current_booking()
-
-    def colour_fn(self, booking_model: BookingModel):
-        """
-        Returns a colour based on the booking's completion status.
-        """
-        is_completed = self.ui_state.app_state.database.is_booking_completed(
-            booking_model.id
-        )
-        needs_payment = self.ui_state.app_state.database.booking_has_pending_payments(
-            booking_model.id
-        )
-        if is_completed:
-            if needs_payment:
-                return "orange"
-            return "green"
-        return "red"
-
-    def update_current_booking(self):
-        self.search_bar.on_search()
-        if self.current_booking is None:
-            self.booking_name.configure(text="Unselected")
-            self.booking_description.configure(text="Select a booking to see details.")
-            for widget in self.booking_services_list.winfo_children():
-                widget.destroy()
-
-            self.booking_delete_button.configure(state="disabled")
-            self.booking_services_completion_text.configure(text="")
-            self.booking_price_text.configure(text="")
-
-            return
-
-        self.booking_name.configure(text=f"Booking ID: {self.current_booking.id}")
-        self.booking_delete_button.configure(state="normal")
-
-        customer_model = self.ui_state.app_state.database.get_customer_by_id(
-            self.current_booking.customer_id
-        )
-        property_model = self.ui_state.app_state.database.get_property_by_id(
-            self.current_booking.property_id
-        )
-        datetime_str = self.current_booking.when.strftime("%Y-%m-%d %H:%M")
-
-        self.booking_description.configure(
-            text=f"Customer: {customer_model}\n"
-            f"Property: {property_model}\n"
-            f"When: {datetime_str}"
-        )
-
-        # Clear previous services
-        for widget in self.booking_services_list.winfo_children():
-            widget.destroy()
-
-        # Load services for the current booking
-        booking_services = (
-            self.ui_state.app_state.database.get_booking_services_by_booking_id(
-                self.current_booking.id
-            )
-        )
-
-        if not booking_services:
-            self.booking_services_list.pack_forget()
-            self.booking_description.configure(
-                text=f"No services found for booking ID: {self.current_booking.id}"
-            )
-            return
-
-        total_services = len(booking_services)
-        completed_services = sum(1 for service in booking_services if service.completed)
-        for service_model in booking_services:
-            service = self.ui_state.app_state.database.get_service_by_id(
-                service_model.service_id
-            )
-            if service:
-                service_label_button = ctk.CTkButton(
-                    master=self.booking_services_list,
-                    text=f"{service.name} - {'Completed' if service_model.completed else 'Pending'}",
-                    command=lambda sm=service_model: self.ui_state.app_state.database.toggle_booking_service_completion(
-                        sm.booking_id,
-                        sm.service_id,
-                    ),
-                )
-                service_label_button.pack(fill="x", padx=5, pady=2)
-
-        self.booking_services_list.pack(expand=True, fill="both", padx=10, pady=10)
-        self.booking_services_completion_text.configure(
-            text=f"Services: {completed_services}/{total_services}"
-        )
-
-        total_paid, total_price = (
-            self.ui_state.app_state.database.booking_get_paid_total_cost(
-                self.current_booking.id
-            )
-        )
-
-        self.booking_price_text.configure(
-            text=f"Total Price: ${total_price:.2f}, Total Paid: ${total_paid:.2f}"
-        )
-
-    def remove_selected(self):
-        if self.current_booking is None:
-            self.ui_state.err("No booking selected.")
-            return
-
-        # clear services first
-        if not self.ui_state.app_state.database.remove_booking_service_in_booking(
-            self.current_booking.id,
-        ):
-            self.ui_state.err(
-                f"Failed to delete booking services: {self.ui_state.app_state.database.last_error}"
-            )
-            return
-
-        if self.ui_state.app_state.database.remove_booking_by_id(
-            [self.current_booking.id]
-        ):
-            self.ui_state.info("Booking deleted successfully.")
-            self.current_booking = None
-            self.update_current_booking()
-        else:
-            self.ui_state.err(
-                f"Failed to delete booking: {self.ui_state.app_state.database.last_error}"
-            )
-
-        self.search_bar.on_search()
-
-
-class BookingTabView(ctk.CTkTabview):
-    def __init__(self, ui_state: UIState, master=None):
-        super().__init__(master)
-        self.ui_state = ui_state
-
-        self.add("Overview")
-        self.add("Create Booking")
-        self.set("Overview")
-
-        self.uncompleted_bookings_label = ctk.CTkLabel(
-            master=self.tab("Overview"),
-        )
-        self.uncompleted_bookings_label.pack(pady=10)
-
-        self.booking_manager = BookingManager(
-            ui_state=self.ui_state, master=self.tab("Overview")
-        )
-        self.booking_manager.pack(expand=True, fill="both")
-
-        self.create_booking_form = CreateBookingForm(
-            ui_state=self.ui_state, master=self.tab("Create Booking")
-        )
-        self.create_booking_form.pack(expand=True, fill="both")
-
-        self.on_data_updated()
-
-        self.ui_state.app_state.database.bookings_changed.connect(self.on_data_updated)
-        self.ui_state.app_state.database.booking_services_changed.connect(
-            self.on_data_updated
-        )
-
-    def on_data_updated(self):
-        # Update the uncompleted bookings label
-        self.uncompleted_bookings_label.configure(
-            text=f"Uncompleted Bookings: {self.ui_state.app_state.database.get_number_uncompleted_bookings()}"
-        )
-
-
-class CreateServiceForm(ctk.CTkFrame):
-    def __init__(self, ui_state: UIState, master=None):
-        super().__init__(master)
-        self.ui_state = ui_state
-
-        self.name_entry = ctk.CTkEntry(master=self, placeholder_text="Service Name")
-        self.name_entry.pack(pady=5)
-
-        self.base_price_entry = ctk.CTkEntry(master=self, placeholder_text="Base Price")
-        self.base_price_entry.pack(pady=5)
-
-        self.submit_button = ctk.CTkButton(
-            master=self, text="Submit", command=self.submit
-        )
-        self.submit_button.pack(pady=5)
-
-    def submit(self):
-        name = self.name_entry.get()
-        base_price = self.base_price_entry.get()
-
-        if not (name and base_price):
-            self.ui_state.err("All fields are required.")
-            return
-
-        try:
-            base_price = float(base_price)
-        except ValueError:
-            self.ui_state.err("Base Price must be a valid number.")
-            return
-
-        model = ServiceModel(-1, name, base_price)
-        self.ui_state.app_state.database.add_service(model)
-
-        self.ui_state.info("Service created successfully.")
-        self.clear_fields()
-
-    def clear_fields(self):
-        self.name_entry.delete(0, "end")
-        self.base_price_entry.delete(0, "end")
-
-
-class ServiceTabView(ctk.CTkTabview):
-    def __init__(self, ui_state: UIState, master=None):
-        super().__init__(master)
-        self.ui_state = ui_state
-
-        self.add("Services")
-        self.add("Create Service")
-        self.set("Services")
-
-        self.services_tab = ServiceTab(
-            ui_state=self.ui_state, master=self.tab("Services"), access=Access.READ
-        )
-        self.services_tab.pack(expand=True, fill="both")
-
-        self.create_service_form = CreateServiceForm(
-            ui_state=self.ui_state, master=self.tab("Create Service")
-        )
-        self.create_service_form.pack(expand=True, fill="both")
-
-
-class CreatePaymentForm(ctk.CTkFrame):
-    def __init__(self, ui_state: UIState, master=None):
-        super().__init__(master)
-        self.ui_state = ui_state
-
-        self.time_range = DateTimeRangeEntry(
-            master=self,
-        )
-        self.time_range.pack(pady=5, expand=True, fill="x")
-
-        self.booking_search = SearchbarWithCompletion(
-            title="Booking",
-            search_fn=self.search_bookings,
-            on_choose=self.on_booking_choose,
-            colour_fn=self.colour_fn,
-            master=self,
-        )
-        self.booking_search.pack(pady=5, expand=True, fill="x")
-
-        self.time_range.signal.connect(lambda: self.booking_search.on_search())
-
-        self.remaining_amount_label = ctk.CTkLabel(master=self, text="")
-        self.remaining_amount_label.pack(pady=5)
-
-        self.amount_entry = ctk.CTkEntry(
-            master=self, placeholder_text="Payment amount ($)"
-        )
-        self.amount_entry.pack(pady=5)
-
-        self.submit_button = ctk.CTkButton(
-            master=self, text="Submit", command=self.submit
-        )
-        self.submit_button.pack(pady=5)
-
-        self.valid_payment_amount = 0
-
-    def colour_fn(self, booking_model: BookingModel):
-        if self.ui_state.app_state.database.is_booking_completed(booking_model.id):
-            if self.ui_state.app_state.database.booking_has_pending_payments(
-                booking_model.id
-            ):
-                return "orange"
-            return "green"
-        return "red"
-
-    def search_bookings(self, query: str):
-        """
-        Searches for bookings based on the query and returns a list of booking models.
-        """
-        bookings = self.ui_state.app_state.database.search_bookings(
-            query, time=self.time_range.valid_range
-        )
-        for booking in bookings:
-            booking.assure()
-        return bookings
-
-    def on_booking_choose(self, booking_model: BookingModel):
-        total_paid, total_price = (
-            self.ui_state.app_state.database.booking_get_paid_total_cost(
-                booking_model.id
-            )
-        )
-        self.valid_payment_amount = total_price - total_paid
-
-        self.remaining_amount_label.configure(
-            text=f"$ {round(total_paid)}/{round(total_price)}, max payment: $ {round(self.valid_payment_amount)}"
-        )
-
-    def submit(self):
-        booking_model: BookingModel = self.booking_search.selected
-        amount = self.amount_entry.get()
-
-        if booking_model is None or not amount:
-            self.ui_state.err("Booking and amount are required.")
-            return
-
-        try:
-            amount = float(amount)
-            if amount <= 0:
-                raise ValueError("Amount must be greater than zero.")
-            elif amount > self.valid_payment_amount:
-                raise ValueError(
-                    f"Amount exceeds the maximum allowed payment of ${self.valid_payment_amount}."
-                )
-        except ValueError:
-            self.ui_state.err("Amount must be a valid number.")
-            return
-
-        model = PaymentModel(
-            id=-1,
-            booking_id=booking_model.id,
-            amount=amount,
-            payment_date=datetime.now(),
-        )
-        if self.ui_state.app_state.database.create_payment(model):
-            self.ui_state.info("Payment created successfully.")
-            self.clear_fields()
-        else:
-            self.ui_state.err(
-                f"Failed to create payment: {self.ui_state.app_state.database.last_error}"
-            )
-
-    def clear_fields(self):
-        self.booking_search.clear_selection()
-        self.amount_entry.delete(0, "end")
-
-        self.remaining_amount_label.configure(text="")
-        self.valid_payment_amount = 0
-
-
-class PaymentTabView(ctk.CTkTabview):
-    def __init__(self, ui_state: UIState, master=None):
-        super().__init__(master)
-        self.ui_state = ui_state
-
-        self.add("Add")
-        self.set("Add")
-
-        # Placeholder for payment management functionality
-        self.create_payment_form = CreatePaymentForm(
-            ui_state=self.ui_state, master=self.tab("Add")
-        )
-        self.create_payment_form.pack(expand=True, fill="both")
-
-
-class TabView(ctk.CTkTabview):
-    def __init__(self, ui_state: UIState, master=None):
-        super().__init__(master)
-        self.ui_state = ui_state
-
-        self.add("Payments")
-        self.add("Customers")
-        self.add("Properties")
-        self.add("Bookings")
-        self.add("Services")
-        self.add("Direct Access")
-        self.set("Payments")
-
-        self.payments_tab = PaymentTabView(
-            ui_state=self.ui_state, master=self.tab("Payments")
-        )
-        self.payments_tab.pack(expand=True, fill="both")
-
-        # self.home_tab = ctk.CTkFrame(self.tab("Home"))
-        # self.home_tab.pack(expand=True, fill="both")
-
-        self.create_customer_form = CreateCustomerForm(
-            ui_state=self.ui_state, master=self.tab("Customers")
-        )
-        self.create_customer_form.pack(expand=True, fill="both")
-
-        self.create_property_form = CreatePropertyForm(
-            ui_state=self.ui_state, master=self.tab("Properties")
-        )
-        self.create_property_form.pack(expand=True, fill="both")
-
-        self.bookings = BookingTabView(
-            ui_state=self.ui_state, master=self.tab("Bookings")
-        )
-        self.bookings.pack(expand=True, fill="both")
-
-        self.services_tab = ServiceTabView(
-            ui_state=self.ui_state, master=self.tab("Services")
-        )
-        self.services_tab.pack(expand=True, fill="both")
-
-        self.direct_access_tab = DirectAccessTabView(
-            ui_state=self.ui_state, master=self.tab("Direct Access")
-        )
-        self.direct_access_tab.pack(expand=True, fill="both")
-
-
-class Ui(ctk.CTk):
-    def __init__(self, app_state: State):
+from PySide6.QtCore import Qt, QSize, QPoint, QDate
+import pydantic
+
+# notifications are handled via UIState methods (app_state or prints)
+import auth
+import database
+from fakes import generate_person, generate_property
+import query
+from schema import Booking, Payment, Person, Property, DbModel, Service
+
+
+class TableView(QWidget):
+    def __init__(
+        self,
+        model_class: type[DbModel],
+        get_paginated_data: Callable[[int, int, dict[str, str]], list[DbModel]],
+        get_count: Callable[[], int],
+        hidden_fields: list[str] = [],
+        context_menu_actions: dict[str, Callable[[str, DbModel], None]] = {},
+    ):
         super().__init__()
-        self.ui_state = UIState()
-        self.ui_state.app_state = app_state
-        self.ui_state.notification_manager = NotificationManager(self)
-        self.title("Lawn Database")
-        self.geometry("800x600")
-        self.iconbitmap("static/icon.ico")
+        self.get_paginated_data = get_paginated_data
+        self.get_count = get_count
+        self.hidden_fields = hidden_fields
+        self.context_menu_actions = context_menu_actions
 
-        # Create UI elements here
-        label = ctk.CTkLabel(master=self, text="Lawn Database")
-        label.pack(pady=20)
+        self.current_page = 0
 
-        # self.tab_view = TabView(ui_state=self.ui_state, master=self)
-        # self.tab_view.pack(expand=True, fill="both")
+        self.fields = model_class.model_fields
 
-        self.tab_view = TabView(ui_state=self.ui_state, master=self)
-        self.tab_view.pack(expand=True, fill="both")
+        self.box = QVBoxLayout(self)
+        self.search = QLineEdit(self)
+        self.search.setPlaceholderText("Search...")
+        self.box.addWidget(self.search)
+
+        self.search.textChanged.connect(self.on_search_text_changed)
+
+        self.table = QTableWidget(self)
+        self.table.setColumnCount(len(self.fields))
+        self.table.setHorizontalHeaderLabels(
+            [field for field in self.fields if field not in self.hidden_fields]
+        )
+        self.table.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        # allow the table columns to stretch to fill available width
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        # allow this whole TableView widget to expand inside parent layouts
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+
+        # give the table vertical stretch so it fills the TableView
+        self.box.addWidget(self.table, 1)
+
+        if self.context_menu_actions:
+            self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self.table.customContextMenuRequested.connect(self.show_context_menu)
+
+        self.bar = QHBoxLayout()
+
+        self.left_button = QPushButton("<", self)
+        self.left_button.clicked.connect(self.go_to_previous_page)
+        self.bar.addWidget(self.left_button)
+
+        self.refresh_button = QPushButton("Refresh", self)
+        self.refresh_button.clicked.connect(self.refresh)
+        self.bar.addWidget(self.refresh_button)
+
+        self.page_label = QLabel("Page 1", self)
+        self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.bar.addWidget(self.page_label)
+
+        self.right_button = QPushButton(">", self)
+        self.right_button.clicked.connect(self.go_to_next_page)
+        self.bar.addWidget(self.right_button)
+
+        self.box.addLayout(self.bar)
+
+        self.update()
+
+    def refresh(self):
+        self.current_page = 0
+        self.update()
+
+    def on_search_text_changed(self, text: str):
+        self.current_page = 0
+        self.update()
+
+    def update(self):
+        data = self.get_paginated_data(self.current_page * 10, 10, self.search.text())
+        self.update_table(data)
+
+    def update_table(self, data: list[DbModel]):
+        self.cached_count = self.get_count()
+        self.table.setRowCount(len(data))
+
+        for row_index, item in enumerate(data):
+            for col_index, field in enumerate(self.fields):
+                if field in self.hidden_fields:
+                    continue
+                value = getattr(item, field, "")
+                if isinstance(value, date):
+                    value = value.strftime("%Y-%m-%d")
+                wig = QTableWidgetItem(str(value))
+                wig.setData(Qt.ItemDataRole.UserRole, item)
+                self.table.setItem(row_index, col_index, wig)
+        self.page_label.setText(
+            f"Page {self.current_page + 1}/{self.cached_count // 10 + 1}"
+        )
+
+    def go_to_previous_page(self):
+        self.cached_count = self.get_count()
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update()
+
+    def go_to_next_page(self):
+        self.cached_count = self.get_count()
+        if self.current_page < (self.cached_count // 10):
+            self.current_page += 1
+            self.update()
+
+    def show_context_menu(self, pos: QPoint):
+        item = self.table.itemAt(pos)
+        if item and self.context_menu_actions:
+            menu = QMenu(self)
+            item_column = item.column()
+            field_keys = list(self.fields.keys())
+            item_data = item.data(Qt.ItemDataRole.UserRole)
+            for action_name, actionfn in self.context_menu_actions.items():
+                action = QAction(action_name, menu)
+                action.setData(actionfn)
+                # bind actionfn, field name and item data into defaults so each
+                # lambda captures the current values (avoid late-binding bug)
+                field_name = field_keys[item_column]
+                action.triggered.connect(
+                    lambda _, fn=actionfn, fname=field_name, data=item_data: fn(
+                        fname, data
+                    )
+                )
+                menu.addAction(action)
+            menu.exec(self.table.viewport().mapToGlobal(pos))
+
+
+searchers = {
+    Person: lambda offset, limit, q: query.search_persons(q, offset, limit).value,
+    Property: lambda offset, limit, q: query.search_properties(q, offset, limit).value,
+    Booking: lambda offset, limit, q: query.search_bookings(q, offset, limit).value,
+    Service: lambda offset, limit, q: query.search_services(q, offset, limit).value,
+}
+
+
+class SearchWithList(QDialog):
+    def __init__(
+        self,
+        model: type[DbModel],
+        on_done: Callable[[QDialog, bool, DbModel], None],
+        search: Callable[[int, int, str], list[DbModel]] = None,
+    ):
+        super().__init__()
+
+        self.setWindowTitle("Search")
+        self.setMinimumWidth(400)
+
+        layout = QVBoxLayout(self)
+
+        self.search_input = QLineEdit(self)
+        self.search_input.setPlaceholderText("Search...")
+        layout.addWidget(self.search_input)
+
+        self.results_list = QListWidget(self)
+        self.results_list.itemClicked.connect(self.handle_item_clicked)
+        layout.addWidget(self.results_list)
+
+        self.setLayout(layout)
+
+        self.model = model
+        self.on_done = on_done
+        self.search = search
+
+        self.search_input.textChanged.connect(
+            lambda text: self.update_results(self.search_input.text())
+        )
+
+        self.update_results("")
+
+    def update_results(self, search_text: str):
+        if self.search:
+            results = self.search(0, 10, search_text)
+            self.results_list.clear()
+            for result in results:
+                item = QListWidgetItem(str(result), self.results_list)
+                item.setData(Qt.ItemDataRole.UserRole, result)
+                self.results_list.addItem(item)
+
+    def handle_item_clicked(self, item: QListWidgetItem):
+        self.on_done(self, True, item.data(Qt.ItemDataRole.UserRole))
+
+    def closeEvent(self, _):
+        self.on_done(self, False, None)
+
+
+# a button but when you click it it opens a window to choose using a search
+class LineEditWithSearch(QPushButton):
+    def __init__(
+        self,
+        model: type[DbModel],
+        search: Callable[[str], list[DbModel]],
+        setter: Callable[[DbModel], None] = None,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.model = model
+        self.setText("Search...")
+        self.search = search
+        self.pressed.connect(self.open_search)
+        self.setter = setter
+        self.valid = False
+
+    def open_search(self):
+        self.search_list = SearchWithList(
+            model=self.model, on_done=self.handle_search_result, search=self.search
+        )
+        self.search_list.show()
+
+    def handle_search_result(self, dialog: QDialog, accepted: bool, data: DbModel):
+        if accepted:
+            self.setText(str(data))
+            self.valid = True
+            if self.setter:
+                self.setter(data)
+        dialog.close()
+
+
+validators = {
+    int: QIntValidator,
+    float: QDoubleValidator,
+    str: None,
+}
+
+
+def convert_safe(callable, value) -> tuple[bool, Any]:
+    try:
+        return True, callable(value)
+    except ValueError as e:
+        return False, None
+    except Exception as e:
+        print(f"Error occurred in {callable.__name__}: {e}")
+        return False, None
+
+
+def default_init(T):
+    if T == int:
+        return 0
+    elif T == float:
+        return 0.0
+    elif T == str:
+        return ""
+    elif T == list:
+        return []
+    elif T == dict:
+        return {}
+    elif T == bool:
+        return False
+    return None
+
+
+def create_datatype_widget(
+    T: type,
+    initial_value: Any,
+    setter,
+    parent=None,
+    is_top: False = False,
+    search_fields: dict[str, type[DbModel]] = None,
+) -> QWidget:
+    widget = None
+    if issubclass(T, DbModel) and not is_top:
+        widget = LineEditWithSearch(
+            model=T,
+            search=searchers[T],
+            setter=lambda data, setter=setter: setter(data.id),
+        )
+        if parent:
+            widget.setParent(parent)
+    elif T == int:
+        widget = QSpinBox(parent=parent)
+        widget.setValue(initial_value)
+        widget.valueChanged.connect(lambda value, setter=setter: setter(value))
+    elif T == float:
+        widget = QDoubleSpinBox(parent=parent)
+        widget.setValue(initial_value)
+        widget.valueChanged.connect(lambda value, setter=setter: setter(value))
+    elif T == str or T == pydantic.EmailStr:
+        widget = QLineEdit(initial_value, parent=parent)
+        widget.textChanged.connect(lambda text, setter=setter: setter(text))
+    elif T == list:
+        widget = QFormLayout(parent=parent)
+        for item in initial_value:
+
+            def inner_setter(item, new_value, setter):
+                initial_value.__setitem__(item, new_value)
+                setter(initial_value)
+
+            wid = create_datatype_widget(
+                str,
+                item,
+                lambda new_value, item=item, setter=setter: inner_setter(
+                    item, new_value, setter
+                ),
+            )
+            widget.addRow(wid)
+    elif T == date:
+        widget = QDateEdit(parent=parent)
+        widget.setDate(QDate.fromString(str(initial_value), "yyyy-MM-dd"))
+        widget.dateChanged.connect(lambda date, setter=setter: setter(date.toPython()))
+    elif T == bool:
+        widget = QCheckBox(parent=parent)
+        widget.setChecked(initial_value)
+        widget.stateChanged.connect(
+            lambda state, setter=setter: setter(state == Qt.CheckState.Checked)
+        )
+    elif T == dict or typing.get_origin(T) == dict:
+        widget = QFormLayout(parent=parent)
+        for key, value in initial_value.items():
+
+            def inner_setter(initial_value, key, new_value, setter):
+                initial_value.__setitem__(key, new_value)
+                setter(initial_value)
+
+            widget.addRow(
+                QLabel(key),
+                create_datatype_widget(
+                    value.__class__,
+                    value,
+                    lambda new_value, key=key, initial_value=initial_value, setter=setter: inner_setter(
+                        initial_value, key, new_value, setter
+                    ),
+                ),
+            )
+
+    elif issubclass(T, pydantic.BaseModel):
+        widget = QFormLayout(parent=parent)
+        for field, info in T.model_fields.items():
+            if field not in initial_value:
+                continue
+
+            def inner_setter(initial_value, new_value, setter, field):
+                initial_value[field] = new_value
+                setter(initial_value)
+
+            wig = create_datatype_widget(
+                (
+                    search_fields[field]
+                    if search_fields and field in search_fields
+                    else info.annotation
+                ),
+                initial_value[field],
+                setter=lambda new_value, initial_value=initial_value, setter=setter, field=field: inner_setter(
+                    initial_value, new_value, setter, field
+                ),
+            )
+            widget.addRow(QLabel(field), wig)
+    else:
+        print(f"Unsupported type for widget creation: {T}")
+    return widget
+
+
+def create_modal_floating(
+    name: str,
+    model: DbModel,
+    on_done: Callable[[QDialog, bool, DbModel], None],
+    ignore_fields: list[str] = None,
+    rename_fields: dict[str, str] = None,
+    search_fields: dict[str, type[DbModel]] = None,
+):
+    # creates a window and puts all the fields in
+    dialog = QDialog(modal=False)
+    dialog.setWindowTitle(name)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    dialog.setWindowFlag(Qt.WindowType.Tool, True)
+
+    fields = model.model_dump()
+    new_fields = {
+        field: value for field, value in fields.items() if field not in ignore_fields
+    }
+
+    reverse = dict()
+    # rename fields
+    if rename_fields:
+        new_fields = {
+            rename_fields.get(field, field): value
+            for field, value in new_fields.items()
+        }
+        reverse = {value: key for key, value in rename_fields.items()}
+
+    def setter(data: dict):
+        for key, value in data.items():
+            key = reverse.get(key, key)
+            model.__setattr__(key, value)
+
+    layout: QFormLayout = create_datatype_widget(
+        model.__class__,
+        new_fields,
+        setter=setter,
+        parent=dialog,
+        is_top=True,
+        search_fields=search_fields,
+    )
+
+    button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+    button_box.accepted.connect(lambda: on_done(dialog, True, model))
+    button_box.rejected.connect(lambda: on_done(dialog, False, None))
+    layout.addRow(button_box)
+
+    dialog.show()
+
+    return dialog
+
+
+class PersonManagement(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        layout = QVBoxLayout(self)
+
+        self.add_new_person_button = QPushButton("Add New Person", self)
+        self.add_new_person_button.clicked.connect(self.add_new_person)
+        layout.addWidget(self.add_new_person_button)
+
+        self.add_fake_person_button = QPushButton("Add Fake Person", self)
+        self.add_fake_person_button.clicked.connect(self.add_fake_person)
+        layout.addWidget(self.add_fake_person_button)
+
+        self.people_table = TableView(
+            model_class=Person,
+            get_paginated_data=searchers[Person],
+            get_count=lambda: query.get_person_count().one(),
+            context_menu_actions={
+                "delete": lambda field, person: self.delete_person(person),
+                "copy": lambda field, person: self.copy_person(field, person),
+                "change rank": lambda field, person: self.rank_person(person),
+            },
+        )
+        layout.addWidget(self.people_table, 1)
+
+        database.database_updated.connect(self.people_table.update)
+
+        self.setLayout(layout)
+
+    def delete_person(self, person: Person):
+        if person.id == 1:
+            print("Error: Cannot delete admin user.")
+            return
+        result = query.delete_person(person.id)
+        if result.error:
+            print(f"Error deleting person: {result.error}")
+        else:
+            self.people_table.refresh()
+
+    def copy_person(self, field: str, person: Person):
+        value = getattr(person, field, None)
+        if value is not None:
+            print(f"Copied {field} from {person} with value: {value}")
+            QGuiApplication.clipboard().setText(str(value))
+
+    def add_fake_person(self):
+        person = generate_person()
+        result = query.create_person(**person.model_dump(exclude=["id", "is_employee"]))
+        if result.error:
+            print(f"Error adding fake person: {result.error}")
+        else:
+            self.people_table.update()
+
+    def rank_person(self, person: Person):
+        if person.id == 1:
+            print("Error: Cannot change rank of admin user.")
+            return
+        if person.is_employee:
+            result = query.set_person_customer(person.id)
+        else:
+            result = query.set_person_employee(person.id)
+        if result.error:
+            print(f"Error changing rank of person: {result.error}")
+        else:
+            self.people_table.update()
+
+    def add_new_person(self):
+        new_person = Person(
+            id=-1,
+            email="email@example.com",
+            first_name="First",
+            last_name="Last",
+            phone_number="123-456-7890",
+            is_employee=False,
+            hashed_password="password123",
+            username="username",
+        )
+        modal = create_modal_floating(
+            "Add New Person",
+            new_person,
+            self.handle_add_new_person,
+            ignore_fields=["id", "is_employee"],
+            rename_fields={"hashed_password": "password"},
+        )
+
+    def handle_add_new_person(self, dialog: QDialog, success: bool, person: Person):
+        if success:
+            try:
+                person.hashed_password = auth.hash_plaintext(person.hashed_password)
+                person = Person(**person.model_dump())
+                query.create_person(**person.model_dump(exclude=["id", "is_employee"]))
+            except Exception as e:
+                print(f"Error adding new person: {e}")
+        dialog.close()
+
+
+class PropertyManagement(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        layout = QVBoxLayout(self)
+
+        self.add_new_property_button = QPushButton("Add New Property", self)
+        self.add_new_property_button.clicked.connect(self.add_new_property)
+        layout.addWidget(self.add_new_property_button)
+
+        self.add_fake_property_button = QPushButton("Add Fake Property", self)
+        self.add_fake_property_button.clicked.connect(self.add_fake_property)
+        layout.addWidget(self.add_fake_property_button)
+
+        self.property_table = TableView(
+            model_class=Property,
+            get_paginated_data=searchers[Property],
+            get_count=lambda: query.get_property_count().one(),
+            context_menu_actions={
+                "delete": lambda field, property: self.delete_property(property),
+                "copy": lambda field, property: self.copy_property(field, property),
+            },
+        )
+        layout.addWidget(self.property_table, 1)
+
+        database.database_updated.connect(self.property_table.update)
+
+        self.setLayout(layout)
+
+    def delete_property(self, property: Property):
+        result = query.delete_property(property.id)
+        if result.error:
+            print(f"Error deleting property: {result.error}")
+        else:
+            self.property_table.refresh()
+
+    def copy_property(self, field: str, property: Property):
+        value = getattr(property, field, None)
+        if value is not None:
+            print(f"Copied {field} from {property} with value: {value}")
+            QGuiApplication.clipboard().setText(str(value))
+
+    def add_fake_property(self):
+        property = generate_property()
+        result = query.create_property(**property.model_dump(exclude=["id"]))
+        if result.error:
+            print(f"Error adding fake property: {result.error}")
+        else:
+            self.property_table.update()
+
+    def add_new_property(self):
+        new_property = Property(
+            id=-1,
+            city="Perth",
+            post_code="6000",
+            state="WA",
+            street_address="123 Fake St",
+        )
+        modal = create_modal_floating(
+            "Add New Property",
+            new_property,
+            self.handle_add_new_property,
+            ignore_fields=["id"],
+        )
+
+    def handle_add_new_property(
+        self, dialog: QDialog, success: bool, property: Property
+    ):
+        if success:
+            try:
+                property = Property(**property.model_dump())
+                query.create_property(**property.model_dump(exclude=["id"]))
+            except Exception as e:
+                print(f"Error adding new property: {e}")
+        dialog.close()
+
+
+class BookingManagement(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        layout = QVBoxLayout(self)
+
+        self.add_new_booking_button = QPushButton("Add New Booking", self)
+        self.add_new_booking_button.clicked.connect(self.add_new_booking)
+        layout.addWidget(self.add_new_booking_button)
+
+        self.booking_table = TableView(
+            model_class=Booking,
+            get_paginated_data=searchers[Booking],
+            get_count=lambda: query.get_booking_count().one(),
+            context_menu_actions={
+                "delete": lambda field, booking: self.delete_booking(booking),
+                "copy": lambda field, booking: self.copy_booking(field, booking),
+            },
+        )
+        layout.addWidget(self.booking_table, 1)
+
+        database.database_updated.connect(self.booking_table.update)
+
+        self.setLayout(layout)
+
+    def delete_booking(self, booking: Booking):
+        result = query.delete_booking(booking.id)
+        if result.error:
+            print(f"Error deleting booking: {result.error}")
+        else:
+            self.booking_table.refresh()
+
+    def copy_booking(self, field: str, booking: Booking):
+        value = getattr(booking, field, None)
+        if value is not None:
+            print(f"Copied {field} from {booking} with value: {value}")
+            QGuiApplication.clipboard().setText(str(value))
+
+    def add_new_booking(self):
+        new_booking = Booking(
+            id=-1,
+            person_id=-1,  # Placeholder, will be set in modal
+            property_id=-1,  # Placeholder, will be set in modal
+            booking_date=date.today(),
+            services={},
+        )
+        modal = create_modal_floating(
+            "Add New Booking",
+            new_booking,
+            self.handle_add_new_booking,
+            ignore_fields=["id", "completed", "services"],
+            search_fields={
+                "property_id": Property,
+                "person_id": Person,
+            },
+        )
+
+    def handle_add_new_booking(self, dialog: QDialog, success: bool, booking: Booking):
+        if success:
+            try:
+                if booking.booking_date < date.today():
+                    raise ValueError("Booking date must be today or in the future")
+                if booking.person_id < 0:
+                    raise ValueError("Person ID must be valid")
+                if booking.property_id < 0:
+                    raise ValueError("Property ID must be valid")
+                booking = Booking(**booking.model_dump(exclude=["services"]))
+                query.create_booking(**booking.model_dump(exclude=["id"]))
+            except Exception as e:
+                print(f"Error adding new booking: {e}")
+        dialog.close()
+
+
+# left hand side with bookings, then a panel on right hand with info and then the list of services
+class BookingServiceManagement(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        layout = QHBoxLayout(self)
+
+        # Use a QListWidget populated from the searcher so the
+        # left panel is visible inside the layout.
+        self.booking_list = SearchWithList(
+            Booking, on_done=self.on_booking_selected, search=searchers[Booking]
+        )
+        layout.addWidget(self.booking_list)
+
+        self.details_panel = QWidget(self)
+        layout.addWidget(self.details_panel)
+
+        # make 1/3 2/3 split
+        layout.setStretch(0, 1)
+        layout.setStretch(1, 2)
+
+        self.setLayout(layout)
+
+        # populate the list initially
+        try:
+            self.update_booking_list()
+        except Exception:
+            # safe no-op if searcher/query not ready
+            pass
+
+        self.details_layout = QVBoxLayout(self.details_panel)
+        self.details_panel.setLayout(self.details_layout)
+
+        self.info_area = QWidget(self.details_panel)
+        self.details_layout.addWidget(self.info_area)
+
+        self.services_area = QWidget(self.details_panel)
+        self.details_layout.addWidget(self.services_area)
+
+    def on_booking_selected(self, dialog: QDialog, success: bool, booking: Booking):
+        # Update the right panel with booking details and services
+        print(f"Selected booking: {booking}")
+        pass
+
+    def _handle_booking_list_click(self, item: QListWidgetItem):
+        # forward QListWidget selection to the same handler signature
+        booking = item.data(Qt.ItemDataRole.UserRole)
+        self.on_booking_selected(None, True, booking)
+
+    def update_booking_list(self, search: str = ""):
+        results = searchers[Booking](0, 20, search)
+        self.booking_list.clear()
+        for r in results:
+            it = QListWidgetItem(str(r), self.booking_list)
+            it.setData(Qt.ItemDataRole.UserRole, r)
+            self.booking_list.addItem(it)
+
+
+class LoginFrame(QWidget):
+    def __init__(
+        self, on_login: Callable[[str, str], Any], close_event: Callable[[], Any]
+    ):
+        super().__init__()
+        self.on_login = on_login
+        self.close_event = close_event
+
+        layout = QVBoxLayout(self)
+
+        self.username_input = QLineEdit(self)
+        self.username_input.setPlaceholderText("Username")
+        layout.addWidget(self.username_input)
+
+        self.password_input = QLineEdit(self)
+        self.password_input.setPlaceholderText("Password")
+        self.password_input.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
+        layout.addWidget(self.password_input)
+
+        login_button = QPushButton("Login", self)
+        login_button.clicked.connect(self.handle_login)
+        layout.addWidget(login_button)
+
+    def handle_login(self):
+        username = self.username_input.text()
+        password = self.password_input.text()
+        if username and password:
+            self.on_login(username, password)
+
+    def closeEvent(self, event):
+        self.close_event()
+
+
+TAB_MANAGE_PERSONS = 0
+TAB_MANAGE_PROPERTIES = 1
+TAB_MANAGE_BOOKINGS = 2
+TAB_MANAGE_BOOKING_SERVICES = 3
+
+
+class Ui(QMainWindow):
+    def __init__(self):
+        super().__init__()
+
+        self.logged_in_as_user: Person | None = None
+
+        self.setWindowTitle("Lawn Database")
+        self.resize(1000, 800)
+
+        central = QWidget(self)
+        self.setCentralWidget(central)
+        central_layout = QVBoxLayout(central)
+        # keep children aligned to the top; avoid centering so expanding widgets
+        # (like the top bar) can fill the full width
+        central_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        self.bigfont = QFont("Arial", 24)
+        self.italicfont = QFont("Arial", 18, italic=True)
+        self.normalfont = QFont("Arial", 12)
+
+        # make a top bar with the logged in user name on the left and logout on the right
+        top_bar = QWidget(central)
+        # make top bar 50px high and expand x
+        top_bar.setFixedHeight(50)
+        top_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        top_bar_layout = QHBoxLayout(top_bar)
+
+        self.logged_in_user_label = QLabel("Logged in as: ", top_bar)
+        self.logged_in_user_label.setFont(self.italicfont)
+        self.logged_in_user_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.logged_in_user_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        top_bar_layout.addWidget(self.logged_in_user_label)
+
+        logout_button = QPushButton("Logout", top_bar)
+        logout_button.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred
+        )
+        logout_button.setFont(self.normalfont)
+        logout_button.clicked.connect(self.handle_logout)
+        top_bar_layout.addWidget(logout_button)
+
+        # add the top bar to the main layout so it can expand to the window width
+        central_layout.addWidget(top_bar)
+
+        self.login_frame = LoginFrame(self.handle_login, self.closeAll)
+        self.login_frame.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+
+        self.tab_widget = QTabWidget(self)
+        self.tab_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        central_layout.addWidget(self.tab_widget)
+
+        # employee only
+        self.manage_persons_widget = PersonManagement()
+        self.tab_widget.addTab(self.manage_persons_widget, "Manage Persons")
+        self.manage_properties_widget = PropertyManagement()
+        self.tab_widget.addTab(self.manage_properties_widget, "Manage Properties")
+        self.manage_bookings_widget = BookingManagement()
+        self.tab_widget.addTab(self.manage_bookings_widget, "Manage Bookings")
+        self.manage_booking_services_widget = BookingServiceManagement()
+        self.tab_widget.addTab(
+            self.manage_booking_services_widget, "Manage Booking Services"
+        )
+
+        self.handle_state()
+
+    def handle_state(self):
+        logged_in = self.logged_in_as_user is not None
+        self.login_frame.setVisible(not logged_in)
+
+        if not logged_in:
+            self.centralWidget().setVisible(False)
+            return
+
+        self.centralWidget().setVisible(True)
+        self.logged_in_user_label.setText(f"Logged in as: {self.logged_in_as_user}")
+
+        is_employee = (
+            self.logged_in_as_user.is_employee if self.logged_in_as_user else False
+        )
+        self.tab_widget.setTabVisible(TAB_MANAGE_PERSONS, is_employee)
+        self.tab_widget.setTabVisible(TAB_MANAGE_PROPERTIES, is_employee)
+        self.tab_widget.setTabVisible(TAB_MANAGE_BOOKINGS, is_employee)
+        self.tab_widget.setTabVisible(TAB_MANAGE_BOOKING_SERVICES, is_employee)
+
+    def handle_login(self, username: str, password: str):
+        result = query.login_person(username, auth.hash_plaintext(password))
+
+        if result.error:
+            print(f"Login failed: {result.error}")
+        else:
+            self.logged_in_as_user = result.one()
+            print(f"Login successful: {self.logged_in_as_user}")
+
+        self.handle_state()
+
+    def handle_logout(self):
+        self.logged_in_as_user = None
+        self.handle_state()
+
+    def closeAll(self):
+        self.close()
+        self.login_frame.close()
