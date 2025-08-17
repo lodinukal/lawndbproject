@@ -42,7 +42,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtCore import Qt, QSize, QPoint, QDate
 
-import edifice as ed
+import fpdf
+
 from edifice import *
 
 import pydantic
@@ -1043,14 +1044,33 @@ class BookingServiceManagement(QWidget):
             print(f"Error: {e}")
 
 
+class RosterCreateInfo(pydantic.BaseModel):
+    start_date: date
+    end_date: date
+    person_id: int
+
+
 class RosterView(QWidget):
     def __init__(self):
         super().__init__()
-        self.calendar = QCalendarWidget(self)
+        self.left_panel = QWidget(self)
+        self.left_layout = QVBoxLayout(self.left_panel)
+
+        self.calendar = QCalendarWidget(self.left_panel)
         self.calendar.setGridVisible(True)
         self.calendar.clicked.connect(self.handle_date_selected)
         self.calendar.setMinimumDate(QDate.currentDate())
         self.calendar.setMaximumDate(QDate.currentDate().addMonths(3))
+        self.left_layout.addWidget(self.calendar, 9)
+
+        self.extra_toolbar = QWidget(self.left_panel)
+        self.extra_toolbar_layout = QHBoxLayout(self.extra_toolbar)
+
+        self.generate_roster_button = QPushButton("Generate Roster", self.extra_toolbar)
+        self.extra_toolbar_layout.addWidget(self.generate_roster_button)
+        self.generate_roster_button.clicked.connect(self.handle_generate_roster)
+
+        self.left_layout.addWidget(self.extra_toolbar, 1)
 
         self.details_widget = QScrollArea(self)
         self.details_widget.setWidgetResizable(True)
@@ -1062,7 +1082,7 @@ class RosterView(QWidget):
 
         self.splitter = QWidget(self)
         self.split_layout = QHBoxLayout(self.splitter)
-        self.split_layout.addWidget(self.calendar, 1)
+        self.split_layout.addWidget(self.left_panel, 1)
         self.split_layout.addWidget(self.details_widget, 1)
 
         layout = QVBoxLayout(self)
@@ -1071,6 +1091,123 @@ class RosterView(QWidget):
         self.setLayout(layout)
 
         database.database_updated.connect(self.update_calendar)
+
+    def handle_generate_roster(self):
+        model = RosterCreateInfo(
+            start_date=self.calendar.selectedDate().toPython(),
+            end_date=self.calendar.selectedDate().toPython(),
+            person_id=1,  # Replace with actual person ID
+        )
+        modal = create_modal_floating(
+            "Generate Roster",
+            model,
+            on_done=self.handle_generate_roster_done,
+            search_fields={
+                "person_id": Person,
+            },
+            rename_fields={"person_id": "person"},
+        )
+
+    def handle_generate_roster_done(
+        self, dialog: QDialog, success: bool, roster: RosterCreateInfo
+    ):
+        if success:
+            # ensure the start is before the end
+            if roster.start_date >= roster.end_date:
+                print("Error: Start date must be before end date.")
+                return
+            person = query.get_person_by_id(roster.person_id).one()
+            if not person:
+                print("Error: Person not found.")
+                return
+            if not person.is_employee:
+                print("Error: Person is not an employee.")
+                return
+
+            # create a pdf and prompt to download
+            pdf = fpdf.fpdf.FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", size=12)
+            pdf.cell(200, 10, txt="Roster", ln=True, align="C")
+            pdf.cell(
+                200, 10, txt=f"Start Date: {roster.start_date}", ln=True, align="C"
+            )
+            pdf.cell(200, 10, txt=f"End Date: {roster.end_date}", ln=True, align="C")
+            pdf.cell(200, 10, txt=f"Person ID: {roster.person_id}", ln=True, align="C")
+
+            pdf.cell(
+                200,
+                10,
+                txt=f"Name: {person.first_name} {person.last_name}",
+                ln=True,
+                align="C",
+            )
+            pdf.cell(200, 10, txt=f"Email: {person.email}", ln=True, align="C")
+
+            all_services = query.get_services_by_person(person.id).value
+
+            def sort_key(s: BookingService):
+                booking = query.get_booking_by_id(s.booking_id).one()
+                return booking.booking_date, s.duration
+
+            all_services.sort(key=sort_key)
+
+            # in batches of 3 print out the services
+            for i in range(0, len(all_services), 3):
+                pdf.add_page()
+                batch = all_services[i : i + 3]
+                for booking_service in batch:
+                    service = query.get_service_by_id(booking_service.service_id).one()
+                    location: query.BookingServiceStrings = (
+                        query.get_booking_service_string(
+                            booking_service.booking_id, booking_service.service_id
+                        ).one()
+                    )
+                    pdf.set_font("Arial", style="B", size=14)
+                    pdf.cell(
+                        200,
+                        10,
+                        txt=f"Service Name: {location.service_name}",
+                        ln=True,
+                    )
+                    pdf.set_font("Arial", size=12)
+                    pdf.cell(
+                        200,
+                        10,
+                        txt=f"Location: {location.property_name}",
+                        ln=True,
+                    )
+                    pdf.cell(
+                        200,
+                        10,
+                        txt=f"Booking Date: {location.booking_date}",
+                        ln=True,
+                    )
+                    pdf.cell(
+                        200,
+                        10,
+                        txt=f"Service Duration (mins): {booking_service.duration}",
+                        ln=True,
+                    )
+                    pdf.cell(
+                        200,
+                        10,
+                        txt=f"Service Price: ${service.price}",
+                        ln=True,
+                    )
+                    pdf.cell(
+                        200,
+                        10,
+                        txt=f"Service Completed: {booking_service.completed}",
+                        ln=True,
+                    )
+
+            pdf_file = (
+                f"roster_{person.first_name}_{person.last_name}_{roster.start_date}.pdf"
+            )
+            pdf.output(pdf_file)
+
+        dialog.close()
 
     def update_calendar(self):
         if self.selected_date is not None:
@@ -1311,6 +1448,12 @@ class ClientBookingView(QWidget):
                 add_payment_button.setText("Payment Complete")
             inner_layout.addWidget(add_payment_button)
 
+            generate_invoice_button = QPushButton("Generate Invoice", inner_widget)
+            generate_invoice_button.clicked.connect(
+                lambda _, bid=booking_id: self.generate_invoice(bid)
+            )
+            inner_layout.addWidget(generate_invoice_button)
+
             inner_layout.addWidget(QFrame(inner_widget, frameShape=QFrame.Shape.HLine))
 
             for service in booking_services:
@@ -1354,6 +1497,64 @@ class ClientBookingView(QWidget):
                 payment.booking_id, payment.amount, payment.payment_date
             )
         dialog.close()
+
+    def generate_invoice(self, booking_id: int):
+        invoice_data = query.get_booking_string(booking_id).one()
+        if not invoice_data:
+            print("No invoice data found.")
+            return
+
+        total_cost = query.get_booking_cost(booking_id).one()
+        if not total_cost:
+            print("No total cost found.")
+            return
+
+        file = fpdf.fpdf.FPDF()
+        file.add_page()
+        file.set_font("Arial", size=12)
+
+        # Add invoice details
+        file.cell(200, 10, txt=f"Invoice for Booking ID: {booking_id}", ln=True)
+        file.cell(200, 10, txt=f"Date: {invoice_data.booking_date}", ln=True)
+        file.cell(200, 10, txt=f"Property: {invoice_data.property_name}", ln=True)
+
+        # Add a line break
+        file.cell(200, 10, txt="", ln=True)
+
+        services = query.get_services_by_booking(booking_id).value
+
+        # print out all of the services
+        for service in services:
+            booking_service_strings = query.get_booking_service_string(
+                booking_id, service.service_id
+            ).one()
+            file.cell(
+                200,
+                10,
+                txt=f" - {booking_service_strings.service_name}: ${booking_service_strings.price}",
+                ln=True,
+            )
+            file.cell(
+                200,
+                10,
+                txt=f"   Duration: {booking_service_strings.duration} mins",
+                ln=True,
+            )
+            file.cell(
+                200,
+                10,
+                txt=f"   Completed: {booking_service_strings.completed}",
+                ln=True,
+            )
+
+        # footer
+        file.cell(200, 10, txt=f"Total Amount: ${total_cost.total}", ln=True)
+        file.cell(200, 10, txt="Thank you for your business!", ln=True)
+
+        # Save the invoice
+        file.output(
+            f"invoice_{invoice_data.booking_date}_{invoice_data.property_name}.pdf"
+        )
 
 
 class LoginFrame(QWidget):

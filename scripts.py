@@ -427,6 +427,7 @@ SELECT
     CONCAT(person.first_name, ' ', person.last_name) AS person_name,
     CONCAT(property.street_address, ', ', property.city, ', ', property.state, ' ', property.post_code) AS property_name,
     CONCAT(service.id, ' (', service.description, ')') AS service_name,
+    booking.booking_date,
     service.price,
     booking_service.duration,
     booking_service.completed
@@ -572,7 +573,10 @@ SELECT * FROM Roster WHERE booking_service_id = :booking_service_id
 # Gets all the booking services for a person
 # :person_id integer - The id of the person whose booking services to retrieve
 GET_SERVICES_BY_PERSON = """
-SELECT * FROM Roster WHERE person_id = :person_id
+SELECT BookingService.* FROM Roster 
+JOIN BookingService ON Roster.booking_service_id = BookingService.id
+JOIN Booking ON BookingService.booking_id = Booking.id
+WHERE Roster.person_id = :person_id ORDER BY Booking.booking_date
 """
 
 # Gets the count of people in a service for a booking
@@ -592,7 +596,7 @@ SELECT COUNT(*) as count FROM Roster WHERE person_id = :person_id
 # :limit integer - The maximum number of people to return
 # :offset integer - The number of people to skip
 GET_PEOPLE_PAGE_BY_SERVICE = """
-SELECT * FROM Person WHERE id IN (SELECT person_id FROM Roster WHERE booking_service_id = :booking_service_id LIMIT :limit OFFSET :offset)
+SELECT * FROM Person WHERE id IN (SELECT Roster.person_id FROM Roster WHERE booking_service_id = :booking_service_id LIMIT :limit OFFSET :offset)
 """
 
 # Gets a page of services for a person

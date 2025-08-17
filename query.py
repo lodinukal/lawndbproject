@@ -51,7 +51,7 @@ def __execute(
     transformer: Callable[[Row], T], script: str, params: dict = None
 ) -> Result[T]:
     result = database.execute(script, params)
-    # transformer = debug_passthrough(transformer)
+    transformer = debug_passthrough(transformer)
     try:
         new_data = (
             list(map(lambda row: transformer(**row), result.data))
@@ -482,6 +482,7 @@ class BookingServiceStrings(pydantic.BaseModel):
     person_name: str
     property_name: str
     service_name: str
+    booking_date: date
     price: float
     duration: int
     completed: bool
@@ -681,17 +682,17 @@ def delete_roster(person_id: int, booking_service_id: int) -> Result[None]:
     )
 
 
-def get_people_by_service(booking_service_id: int) -> Result[list[schema.Person]]:
+def get_people_by_service(booking_service_id: int) -> Result[schema.Person]:
     return __execute(
-        list[schema.Person],
+        schema.Person,
         scripts.GET_PEOPLE_BY_SERVICE,
         {"booking_service_id": booking_service_id},
     )
 
 
-def get_services_by_person(person_id: int) -> Result[list[schema.BookingService]]:
+def get_services_by_person(person_id: int) -> Result[schema.BookingService]:
     return __execute(
-        list[schema.BookingService],
+        schema.BookingService,
         scripts.GET_SERVICES_BY_PERSON,
         {"person_id": person_id},
     )
