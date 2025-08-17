@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS BookingService (
     booking_id INTEGER NOT NULL,
     service_id INTEGER NOT NULL,
     duration INTEGER NOT NULL DEFAULT 60,
+    completed BOOLEAN NOT NULL DEFAULT 0,
     FOREIGN KEY (booking_id) REFERENCES Booking(id),
     FOREIGN KEY (service_id) REFERENCES Service(id)
 );
@@ -67,6 +68,20 @@ VALUES (1, 'Admin', 'User', 'admin@example.com', '123-456-7890', 1, "{}", 'admin
 """.format(
     auth.hash_plaintext("admin123")
 )
+
+# add some default services
+ADD_DEFAULT_SERVICES = """
+INSERT INTO Service (id, description, price) VALUES
+('lawn_mowing', 'Lawn Mowing', 50.00),
+('hedge_trimming', 'Hedge Trimming', 30.00),
+('leaf_removal', 'Leaf Removal', 40.00),
+('snow_removal', 'Snow Removal', 60.00),
+('gutter_cleaning', 'Gutter Cleaning', 70.00),
+('pressure_washing', 'Pressure Washing', 80.00),
+('tree_removal', 'Tree Removal', 90.00),
+('mulching', 'Mulching', 100.00)
+ON CONFLICT DO NOTHING;
+"""
 
 DROP_TABLES = """
 DROP TABLE IF EXISTS Roster;
@@ -272,8 +287,23 @@ SELECT * FROM Booking LIMIT :limit OFFSET :offset
 # :limit integer - The maximum number of bookings to return
 # :offset integer - The number of bookings to skip
 SEARCH_BOOKINGS = """
-SELECT * FROM Booking WHERE booking_date LIKE :query 
+SELECT * FROM Booking WHERE booking_date LIKE :query
+OR (
+    person_id IN (SELECT id FROM Person WHERE first_name LIKE :query OR last_name LIKE :query OR email LIKE :query OR phone_number LIKE :query)
+    OR property_id IN (SELECT id FROM Property WHERE street_address LIKE :query OR city LIKE :query OR state LIKE :query OR post_code LIKE :query)
+)
 LIMIT :limit OFFSET :offset
+"""
+
+# Creates strings from a booking in a single query
+# :booking_id integer - The id of the booking to retrieve
+GET_BOOKING_STRING = """
+SELECT  
+(SELECT CONCAT(first_name, ' ', last_name) FROM Person WHERE id = person_id) AS person_name,  
+(SELECT CONCAT(street_address, ', ', city, ', ', state, ' ', post_code) FROM Property WHERE id = property_id) AS property_name, 
+booking_date
+FROM Booking
+WHERE id = :booking_id
 """
 
 ##
@@ -321,6 +351,14 @@ SEARCH_SERVICES = """
 SELECT * FROM Service WHERE id LIKE :query OR description LIKE :query OR price LIKE :query LIMIT :limit OFFSET :offset
 """
 
+# Gets the cost of a booking
+# :booking_id integer - The id of the booking to retrieve the cost for
+GET_BOOKING_COST = """
+SELECT COALESCE(SUM(Service.price), 0) as total FROM BookingService 
+INNER JOIN Service ON Service.id = BookingService.service_id
+WHERE booking_id = :booking_id
+"""
+
 ##
 ## Booking service management
 ##
@@ -341,10 +379,30 @@ DELETE_BOOKING_SERVICE = """
 DELETE FROM BookingService WHERE booking_id = :booking_id AND service_id = :service_id
 """
 
-# Gets the services for a booking
+# Deletes the booking services for a booking
+# :booking_id integer - The id of the booking to disassociate from the services
+DELETE_BOOKINGS_SERVICES = """
+DELETE FROM BookingService WHERE booking_id = :booking_id
+"""
+
+# Gets a service by booking id and service id
+# :booking_id integer - The id of the booking to associate with the service
+# :service_id integer - The id of the service to associate with the booking
+GET_SERVICE_BY_BOOKING_AND_SERVICE = """
+SELECT * FROM BookingService WHERE booking_id = :booking_id AND service_id = :service_id
+"""
+
+# Toggles the completion status of a booking service
+# :booking_id integer - The id of the booking to associate with the service
+# :service_id integer - The id of the service to associate with the booking
+TOGGLE_COMPLETION_BOOKING_SERVICE = """
+UPDATE BookingService SET completed = NOT completed WHERE booking_id = :booking_id AND service_id = :service_id
+"""
+
+# Gets the services for a booking, ordered by completion
 # :booking_id integer - The id of the booking whose services to retrieve
 GET_SERVICES_BY_BOOKING = """
-SELECT * FROM BookingService WHERE booking_id = :booking_id
+SELECT * FROM BookingService WHERE booking_id = :booking_id ORDER BY completed ASC
 """
 
 # Gets service count for a booking
@@ -353,12 +411,46 @@ GET_SERVICE_COUNT_BY_BOOKING = """
 SELECT COUNT(*) as count FROM BookingService WHERE booking_id = :booking_id
 """
 
-# Gets a page of services for a booking
+# Gets a page of services for a booking ordered by completion
 # :booking_id integer - The id of the booking whose services to retrieve
 # :limit integer - The maximum number of services to return
 # :offset integer - The number of services to skip
 GET_SERVICE_PAGE_BY_BOOKING = """
-SELECT * FROM BookingService WHERE booking_id = :booking_id LIMIT :limit OFFSET :offset
+SELECT * FROM BookingService WHERE booking_id = :booking_id ORDER BY completed ASC LIMIT :limit OFFSET :offset
+"""
+
+# Gets strings for a booking service
+# :booking_id integer - The id of the booking whose service strings to retrieve
+# :service_id integer - The id of the service whose string to retrieve
+GET_BOOKING_SERVICE_STRING = """
+SELECT
+    CONCAT(person.first_name, ' ', person.last_name) AS person_name,
+    CONCAT(property.street_address, ', ', property.city, ', ', property.state, ' ', property.post_code) AS property_name,
+    CONCAT(service.id, ' (', service.description, ')') AS service_name,
+    service.price,
+    booking_service.duration,
+    booking_service.completed
+FROM BookingService booking_service
+JOIN Booking booking ON booking.id = booking_service.booking_id
+JOIN Person person ON person.id = booking.person_id
+JOIN Property property ON property.id = booking.property_id
+JOIN Service service ON service.id = booking_service.service_id
+WHERE booking_id = :booking_id AND service_id = :service_id
+"""
+
+# Gets any services, ordered by completion
+# :booking_id integer - The id of the booking whose services to retrieve
+GET_SERVICES_BY_BOOKING = """
+SELECT * FROM BookingService WHERE booking_id = :booking_id
+"""
+
+# Get the count of completed services for a booking
+# :booking_id integer - The id of the booking whose completed services count to retrieve
+GET_COMPLETED_SERVICE_COUNT_BY_BOOKING = """
+SELECT 
+COALESCE(COUNT(*), 0) as total,
+COALESCE(SUM(BookingService.completed), 0) as completed
+FROM BookingService WHERE booking_id = :booking_id
 """
 
 # Searches the services for a booking
@@ -370,6 +462,21 @@ SEARCH_SERVICES_BY_BOOKING = """
 SELECT * FROM BookingService WHERE booking_id = :booking_id AND (service_id LIKE :query OR duration LIKE :query) LIMIT :limit OFFSET :offset
 """
 
+# Get booking services within a date range
+# :start_date string - The start date of the range (ISO 8601 format)
+# :end_date string - The end date of the range (ISO 8601 format)
+GET_SERVICES_BY_DATE = """
+SELECT * FROM BookingService WHERE booking_id id IN (SELECT id FROM Booking WHERE (booking_date BETWEEN :start_date AND :end_date))
+"""
+
+# Get booking services for a specific person within a date range
+# :person_id integer - The id of the person whose services to retrieve
+# :start_date string - The start date of the range (ISO 8601 format)
+# :end_date string - The end date of the range (ISO 8601 format)
+GET_SERVICES_PERSON_AND_DATE = """
+SELECT * FROM BookingService WHERE booking_id IN (SELECT id FROM Booking WHERE (booking_date BETWEEN :start_date AND :end_date) AND person_id = :person_id)
+"""
+
 ##
 ## Payment Management
 ##
@@ -377,10 +484,22 @@ SELECT * FROM BookingService WHERE booking_id = :booking_id AND (service_id LIKE
 # Creates a payment
 # :booking_id integer - The id of the booking being paid for
 # :amount decimal - The amount of the payment
-# :booking_date string - The date of the payment (ISO 8601 format)
+# :payment_date string - The date of the payment (ISO 8601 format)
 CREATE_PAYMENT = """
-INSERT INTO Payment (booking_id, amount, booking_date)
-VALUES (:booking_id, :amount, :booking_date)
+INSERT INTO Payment (booking_id, amount, payment_date)
+VALUES (:booking_id, :amount, :payment_date)
+"""
+
+# Deletes a payment
+# :payment_id integer - The id of the payment to delete
+DELETE_PAYMENT = """
+DELETE FROM Payment WHERE id = :payment_id
+"""
+
+# Deletes the payment ids associated with a booking
+# :booking_id integer - The id of the booking whose payment ids to delete
+DELETE_PAYMENTS_BY_BOOKING = """
+DELETE FROM Payment WHERE booking_id = :booking_id
 """
 
 # Get a payment by ID
@@ -395,24 +514,34 @@ GET_PAYMENTS_BY_BOOKING = """
 SELECT * FROM Payment WHERE booking_id = :booking_id
 """
 
-# Get payment count
+# Get payment count for a booking
+# :booking_id integer - The id of the booking whose payment count to retrieve
 GET_PAYMENT_COUNT = """
-SELECT COUNT(*) as count FROM Payment
+SELECT COUNT(*) as count FROM Payment WHERE booking_id = :booking_id
 """
 
 # Get a page of payments
+# :booking_id integer - The id of the booking whose payments to retrieve
 # :limit integer - The maximum number of payments to return
 # :offset integer - The number of payments to skip
 GET_PAYMENT_PAGE = """
-SELECT * FROM Payment LIMIT :limit OFFSET :offset
+SELECT * FROM Payment WHERE booking_id = :booking_id LIMIT :limit OFFSET :offset
 """
 
 # Searches for a given payment
+# :booking_id integer - The id of the booking whose payments to search
 # :query string - The search query to use
 # :limit integer - The maximum number of payments to return
 # :offset integer - The number of payments to skip
 SEARCH_PAYMENTS = """
-SELECT * FROM Payment WHERE amount LIKE :query OR booking_date LIKE :query LIMIT :limit OFFSET :offset
+SELECT * FROM Payment WHERE booking_id = :booking_id AND (amount LIKE :query OR booking_date LIKE :query) LIMIT :limit OFFSET :offset
+"""
+
+# Get payment totals for a booking
+# :booking_id integer - The id of the booking whose payment totals to retrieve
+GET_PAYMENT_TOTALS_BY_BOOKING = """
+SELECT COALESCE(SUM(amount), 0) as total_amount, COALESCE(COUNT(*), 0) as total_count
+FROM Payment WHERE booking_id = :booking_id
 """
 
 ##

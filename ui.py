@@ -1,5 +1,5 @@
 # PySide6 UI to interact with the app
-from datetime import date
+from datetime import date, timedelta
 import inspect
 from types import GenericAlias
 from typing import Callable, Any
@@ -28,6 +28,9 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QSpinBox,
     QDoubleSpinBox,
+    QFrame,
+    QCalendarWidget,
+    QSplitter,
 )
 from PySide6.QtGui import (
     QIcon,
@@ -38,6 +41,10 @@ from PySide6.QtGui import (
     QDoubleValidator,
 )
 from PySide6.QtCore import Qt, QSize, QPoint, QDate
+
+import edifice as ed
+from edifice import *
+
 import pydantic
 
 # notifications are handled via UIState methods (app_state or prints)
@@ -45,7 +52,7 @@ import auth
 import database
 from fakes import generate_person, generate_property
 import query
-from schema import Booking, Payment, Person, Property, DbModel, Service
+from schema import Booking, BookingService, Payment, Person, Property, DbModel, Service
 
 
 class TableView(QWidget):
@@ -169,14 +176,14 @@ class TableView(QWidget):
             for action_name, actionfn in self.context_menu_actions.items():
                 action = QAction(action_name, menu)
                 action.setData(actionfn)
-                # bind actionfn, field name and item data into defaults so each
-                # lambda captures the current values (avoid late-binding bug)
                 field_name = field_keys[item_column]
-                action.triggered.connect(
-                    lambda _, fn=actionfn, fname=field_name, data=item_data: fn(
-                        fname, data
-                    )
-                )
+
+                def triggered(
+                    _, actionfn=actionfn, field_name=field_name, item_data=item_data
+                ):
+                    actionfn(field_name, item_data)
+
+                action.triggered.connect(triggered)
                 menu.addAction(action)
             menu.exec(self.table.viewport().mapToGlobal(pos))
 
@@ -186,6 +193,9 @@ searchers = {
     Property: lambda offset, limit, q: query.search_properties(q, offset, limit).value,
     Booking: lambda offset, limit, q: query.search_bookings(q, offset, limit).value,
     Service: lambda offset, limit, q: query.search_services(q, offset, limit).value,
+    BookingService: lambda booking, offset, limit, q: query.search_services_by_booking(
+        booking, q, offset, limit
+    ).value,
 }
 
 
@@ -195,6 +205,7 @@ class SearchWithList(QDialog):
         model: type[DbModel],
         on_done: Callable[[QDialog, bool, DbModel], None],
         search: Callable[[int, int, str], list[DbModel]] = None,
+        stringer: Callable[[DbModel], str] = None,
     ):
         super().__init__()
 
@@ -216,19 +227,19 @@ class SearchWithList(QDialog):
         self.model = model
         self.on_done = on_done
         self.search = search
+        self.stringer = stringer
 
-        self.search_input.textChanged.connect(
-            lambda text: self.update_results(self.search_input.text())
-        )
+        self.search_input.textChanged.connect(lambda text: self.update_results())
 
-        self.update_results("")
+        self.update_results()
 
-    def update_results(self, search_text: str):
+    def update_results(self):
+        stringer = self.stringer if self.stringer else str
         if self.search:
-            results = self.search(0, 10, search_text)
+            results = self.search(0, 10, self.search_input.text())
             self.results_list.clear()
             for result in results:
-                item = QListWidgetItem(str(result), self.results_list)
+                item = QListWidgetItem(stringer(result), self.results_list)
                 item.setData(Qt.ItemDataRole.UserRole, result)
                 self.results_list.addItem(item)
 
@@ -312,6 +323,9 @@ def create_datatype_widget(
     parent=None,
     is_top: False = False,
     search_fields: dict[str, type[DbModel]] = None,
+    rename_fields: dict[str, str] = None,
+    field_limits: dict[str, tuple[float, float]] = None,
+    this_limits: tuple[float, float] = None,
 ) -> QWidget:
     widget = None
     if issubclass(T, DbModel) and not is_top:
@@ -323,11 +337,21 @@ def create_datatype_widget(
         if parent:
             widget.setParent(parent)
     elif T == int:
+        this_limits = this_limits if this_limits else (None, None)
         widget = QSpinBox(parent=parent)
+        if this_limits[0]:
+            widget.setMinimum(this_limits[0])
+        if this_limits[1]:
+            widget.setMaximum(this_limits[1])
         widget.setValue(initial_value)
         widget.valueChanged.connect(lambda value, setter=setter: setter(value))
     elif T == float:
+        this_limits = this_limits if this_limits else (None, None)
         widget = QDoubleSpinBox(parent=parent)
+        if this_limits[0]:
+            widget.setMinimum(this_limits[0])
+        if this_limits[1]:
+            widget.setMaximum(this_limits[1])
         widget.setValue(initial_value)
         widget.valueChanged.connect(lambda value, setter=setter: setter(value))
     elif T == str or T == pydantic.EmailStr:
@@ -337,16 +361,14 @@ def create_datatype_widget(
         widget = QFormLayout(parent=parent)
         for item in initial_value:
 
-            def inner_setter(item, new_value, setter):
+            def inner_setter(new_value, item=item, setter=setter):
                 initial_value.__setitem__(item, new_value)
                 setter(initial_value)
 
             wid = create_datatype_widget(
                 str,
                 item,
-                lambda new_value, item=item, setter=setter: inner_setter(
-                    item, new_value, setter
-                ),
+                inner_setter,
             )
             widget.addRow(wid)
     elif T == date:
@@ -363,18 +385,27 @@ def create_datatype_widget(
         widget = QFormLayout(parent=parent)
         for key, value in initial_value.items():
 
-            def inner_setter(initial_value, key, new_value, setter):
+            def inner_setter(
+                new_value, initial_value=initial_value, key=key, setter=setter
+            ):
                 initial_value.__setitem__(key, new_value)
                 setter(initial_value)
+
+            if rename_fields and key in rename_fields:
+                key = rename_fields[key]
+
+            limits = (0, 1000)
+            if field_limits:
+                limits = field_limits.get(key, this_limits)
 
             widget.addRow(
                 QLabel(key),
                 create_datatype_widget(
                     value.__class__,
                     value,
-                    lambda new_value, key=key, initial_value=initial_value, setter=setter: inner_setter(
-                        initial_value, key, new_value, setter
-                    ),
+                    inner_setter,
+                    field_limits=field_limits,
+                    this_limits=limits,
                 ),
             )
 
@@ -384,9 +415,15 @@ def create_datatype_widget(
             if field not in initial_value:
                 continue
 
-            def inner_setter(initial_value, new_value, setter, field):
+            def inner_setter(
+                new_value, initial_value=initial_value, setter=setter, field=field
+            ):
                 initial_value[field] = new_value
                 setter(initial_value)
+
+            limits = (0, 1000)
+            if field_limits:
+                limits = field_limits.get(field, this_limits)
 
             wig = create_datatype_widget(
                 (
@@ -395,10 +432,13 @@ def create_datatype_widget(
                     else info.annotation
                 ),
                 initial_value[field],
-                setter=lambda new_value, initial_value=initial_value, setter=setter, field=field: inner_setter(
-                    initial_value, new_value, setter, field
-                ),
+                setter=inner_setter,
+                field_limits=field_limits,
+                this_limits=limits,
             )
+
+            if rename_fields and field in rename_fields:
+                field = rename_fields[field]
             widget.addRow(QLabel(field), wig)
     else:
         print(f"Unsupported type for widget creation: {T}")
@@ -409,9 +449,10 @@ def create_modal_floating(
     name: str,
     model: DbModel,
     on_done: Callable[[QDialog, bool, DbModel], None],
-    ignore_fields: list[str] = None,
+    ignore_fields: list[str] = [],
     rename_fields: dict[str, str] = None,
     search_fields: dict[str, type[DbModel]] = None,
+    field_limits: dict[str, tuple[float, float]] = None,
 ):
     # creates a window and puts all the fields in
     dialog = QDialog(modal=False)
@@ -424,18 +465,8 @@ def create_modal_floating(
         field: value for field, value in fields.items() if field not in ignore_fields
     }
 
-    reverse = dict()
-    # rename fields
-    if rename_fields:
-        new_fields = {
-            rename_fields.get(field, field): value
-            for field, value in new_fields.items()
-        }
-        reverse = {value: key for key, value in rename_fields.items()}
-
-    def setter(data: dict):
+    def setter(data: dict, model=model):
         for key, value in data.items():
-            key = reverse.get(key, key)
             model.__setattr__(key, value)
 
     layout: QFormLayout = create_datatype_widget(
@@ -445,6 +476,8 @@ def create_modal_floating(
         parent=dialog,
         is_top=True,
         search_fields=search_fields,
+        rename_fields=rename_fields,
+        field_limits=field_limits,
     )
 
     button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
@@ -631,76 +664,68 @@ class PropertyManagement(QWidget):
         dialog.close()
 
 
-class BookingManagement(QWidget):
+class ServiceManagement(QWidget):
     def __init__(self):
         super().__init__()
 
         layout = QVBoxLayout(self)
 
-        self.add_new_booking_button = QPushButton("Add New Booking", self)
-        self.add_new_booking_button.clicked.connect(self.add_new_booking)
-        layout.addWidget(self.add_new_booking_button)
+        self.add_new_service_button = QPushButton("Add New Service", self)
+        self.add_new_service_button.clicked.connect(self.add_new_service)
+        layout.addWidget(self.add_new_service_button)
 
-        self.booking_table = TableView(
-            model_class=Booking,
-            get_paginated_data=searchers[Booking],
-            get_count=lambda: query.get_booking_count().one(),
+        self.service_table = TableView(
+            model_class=Service,
+            get_paginated_data=searchers[Service],
+            get_count=lambda: query.get_service_count().one(),
             context_menu_actions={
-                "delete": lambda field, booking: self.delete_booking(booking),
-                "copy": lambda field, booking: self.copy_booking(field, booking),
+                "delete": lambda field, service: self.delete_service(service),
+                "copy": lambda field, service: self.copy_service(field, service),
             },
         )
-        layout.addWidget(self.booking_table, 1)
+        layout.addWidget(self.service_table, 1)
 
-        database.database_updated.connect(self.booking_table.update)
+        database.database_updated.connect(self.service_table.update)
 
         self.setLayout(layout)
 
-    def delete_booking(self, booking: Booking):
-        result = query.delete_booking(booking.id)
+    def delete_service(self, service: Service):
+        result = query.delete_service(service.id)
         if result.error:
-            print(f"Error deleting booking: {result.error}")
+            print(f"Error deleting service: {result.error}")
         else:
-            self.booking_table.refresh()
+            self.service_table.refresh()
 
-    def copy_booking(self, field: str, booking: Booking):
-        value = getattr(booking, field, None)
+    def copy_service(self, field: str, service: Service):
+        value = getattr(service, field, None)
         if value is not None:
-            print(f"Copied {field} from {booking} with value: {value}")
+            print(f"Copied {field} from {service} with value: {value}")
             QGuiApplication.clipboard().setText(str(value))
 
-    def add_new_booking(self):
-        new_booking = Booking(
-            id=-1,
-            person_id=-1,  # Placeholder, will be set in modal
-            property_id=-1,  # Placeholder, will be set in modal
-            booking_date=date.today(),
-            services={},
+    def add_new_service(self):
+        new_service = Service(
+            id="Name (must be unique)", description="Description", price=100.0
         )
         modal = create_modal_floating(
-            "Add New Booking",
-            new_booking,
-            self.handle_add_new_booking,
-            ignore_fields=["id", "completed", "services"],
-            search_fields={
-                "property_id": Property,
-                "person_id": Person,
+            "Add New Service",
+            new_service,
+            self.handle_add_new_service,
+            rename_fields={"id": "name"},
+            field_limits={
+                "price": (0.01, 10000.0)  # Price must be positive and reasonable
             },
         )
 
-    def handle_add_new_booking(self, dialog: QDialog, success: bool, booking: Booking):
+    def handle_add_new_service(self, dialog: QDialog, success: bool, service: Service):
         if success:
             try:
-                if booking.booking_date < date.today():
-                    raise ValueError("Booking date must be today or in the future")
-                if booking.person_id < 0:
-                    raise ValueError("Person ID must be valid")
-                if booking.property_id < 0:
-                    raise ValueError("Property ID must be valid")
-                booking = Booking(**booking.model_dump(exclude=["services"]))
-                query.create_booking(**booking.model_dump(exclude=["id"]))
+                if query.get_service_by_id(service.id).one():
+                    raise ValueError("Service ID must be unique")
+                if service.price <= 0:
+                    raise ValueError("Service price must be positive")
+                query.create_service(**service.model_dump())
             except Exception as e:
-                print(f"Error adding new booking: {e}")
+                print(f"Error adding new service: {e}")
         dialog.close()
 
 
@@ -711,21 +736,29 @@ class BookingServiceManagement(QWidget):
 
         layout = QHBoxLayout(self)
 
+        self.booking_id = None
+
+        self.left_panel = QWidget(self)
+        self.left_layout = QVBoxLayout(self.left_panel)
+
         # Use a QListWidget populated from the searcher so the
         # left panel is visible inside the layout.
         self.booking_list = SearchWithList(
-            Booking, on_done=self.on_booking_selected, search=searchers[Booking]
+            Booking,
+            on_done=self.on_booking_selected,
+            search=searchers[Booking],
+            stringer=lambda model: str(query.get_booking_string(model.id).one()),
         )
-        layout.addWidget(self.booking_list)
+        self.left_layout.addWidget(self.booking_list)
+
+        self.add_booking_button = QPushButton("Add Booking", self.left_panel)
+        self.add_booking_button.clicked.connect(self.add_booking)
+        self.left_layout.addWidget(self.add_booking_button)
+
+        layout.addWidget(self.left_panel, 1)
 
         self.details_panel = QWidget(self)
-        layout.addWidget(self.details_panel)
-
-        # make 1/3 2/3 split
-        layout.setStretch(0, 1)
-        layout.setStretch(1, 2)
-
-        self.setLayout(layout)
+        layout.addWidget(self.details_panel, 2)
 
         # populate the list initially
         try:
@@ -737,29 +770,419 @@ class BookingServiceManagement(QWidget):
         self.details_layout = QVBoxLayout(self.details_panel)
         self.details_panel.setLayout(self.details_layout)
 
-        self.info_area = QWidget(self.details_panel)
-        self.details_layout.addWidget(self.info_area)
+        self.details_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        self.services_area = QWidget(self.details_panel)
-        self.details_layout.addWidget(self.services_area)
+        self.info_area = QWidget(self.details_panel)
+        self.info_layout = QVBoxLayout(self.info_area)
+        self.details_layout.addWidget(self.info_area, 1)
+
+        # add a separator line
+        self.details_layout.addWidget(QFrame(self.details_panel))
+
+        self.detail_name = QLabel(self.info_area)
+        self.info_layout.addWidget(self.detail_name)
+
+        self.detail_property = QLabel(self.info_area)
+        self.info_layout.addWidget(self.detail_property)
+
+        self.detail_date = QLabel(self.info_area)
+        self.info_layout.addWidget(self.detail_date)
+
+        self.status_label = QLabel(self.info_area)
+        self.info_layout.addWidget(self.status_label)
+
+        self.payment_label = QLabel(self.info_area)
+        self.info_layout.addWidget(self.payment_label)
+
+        self.delete_button = QPushButton("Delete Booking", self.info_area)
+        self.delete_button.clicked.connect(self.delete_booking)
+        self.delete_button.setVisible(False)
+        self.info_layout.addWidget(self.delete_button)
+
+        self.info_layout.insertStretch(-1, 1)
+
+        self.services_area = QFormLayout(self.details_panel)
+        self.details_layout.addLayout(self.services_area, 3)
+
+        self.add_service_button = QPushButton("Add Service", self.details_panel)
+        self.add_service_button.clicked.connect(self.handle_add_new_service)
+        self.details_layout.addWidget(self.add_service_button)
+
+        self.setLayout(layout)
+
+        database.database_updated.connect(lambda: self.booking_list.update_results())
+        database.database_updated.connect(self.update_services)
+        database.database_updated.connect(self.update_booking_list)
+
+    def add_booking(self):
+        model = Booking(
+            id=-1,
+            booking_date=date.today(),
+            person_id=-1,  # Placeholder, will be set in modal
+            property_id=-1,  # Placeholder, will be set in modal
+        )
+        modal = create_modal_floating(
+            "Add New Booking",
+            model,
+            on_done=self.handle_add_new_booking_done,
+            ignore_fields=["id"],
+            rename_fields={
+                "person_id": "customer",
+                "property_id": "property",
+            },
+            search_fields={
+                "person_id": Person,
+                "property_id": Property,
+            },
+        )
+        modal.exec()
+
+    def handle_add_new_booking_done(
+        self, dialog: QDialog, success: bool, booking: Booking
+    ):
+        if success:
+            try:
+                if booking.booking_date < date.today():
+                    raise ValueError("Booking date must be today or in the future")
+                if booking.person_id < 0:
+                    raise ValueError("Person ID must be valid")
+                if booking.property_id < 0:
+                    raise ValueError("Property ID must be valid")
+                res = query.create_booking(
+                    booking.property_id, booking.person_id, booking.booking_date
+                )
+                if res.lastrowid:
+                    self.booking_id = res.lastrowid
+                    self.update_booking_list()
+            except Exception as e:
+                print(f"Error adding booking: {e}")
+        dialog.close()
+
+    def update_booking_list(self):
+        # check if the object exists still
+        if not self.booking_id:
+            return
+        result = query.get_booking_by_id(self.booking_id)
+        if result.one() is None:
+            self.booking_id = None
+        else:
+            self.on_booking_selected(None, True, result.one())
 
     def on_booking_selected(self, dialog: QDialog, success: bool, booking: Booking):
-        # Update the right panel with booking details and services
-        print(f"Selected booking: {booking}")
-        pass
+        self.booking_id = booking.id
+        self.right_panel_update()
+
+    def right_panel_update(self):
+        if self.booking_id is None:
+            self.detail_name.setText("")
+            self.detail_property.setText("")
+            self.detail_date.setText("")
+            self.status_label.setText("")
+            self.payment_label.setText("")
+            self.delete_button.setVisible(False)
+            while self.services_area.rowCount() > 0:
+                self.services_area.removeRow(0)
+            return
+        booking = query.get_booking_by_id(self.booking_id).one()
+        booking_strings = query.get_booking_string(booking.id).one()
+        self.detail_name.setText(f"Customer Name: {booking_strings.person_name}")
+        self.detail_property.setText(f"Property: {booking_strings.property_name}")
+        self.detail_date.setText(f"Date: {booking_strings.booking_date}")
+        self.delete_button.setVisible(True)
+
+        completion = query.get_completed_service_count_by_booking(self.booking_id).one()
+        if completion:
+            is_done = completion.completed == completion.total
+            status_text = "Done" if is_done else "In Progress"
+            self.status_label.setText(
+                f"{status_text}: {completion.completed}/{completion.total} services completed"
+            )
+        else:
+            self.status_label.setText("Status: No services found")
+
+        paid = query.get_payment_totals_by_booking(self.booking_id).one()
+        total = query.get_booking_cost(self.booking_id).one()
+
+        if paid and total:
+            self.payment_label.setText(
+                f"Payment: ${paid.total_amount}/{total.total}, Remaining: ${total.total - paid.total_amount}"
+            )
+
+        self.update_services()
+
+    def delete_booking(self):
+        if not self.booking_id:
+            return
+        query.delete_bookings_services(self.booking_id)
+        query.delete_booking(self.booking_id)
+        self.booking_id = None
+        self.update_booking_list()
+        self.right_panel_update()
 
     def _handle_booking_list_click(self, item: QListWidgetItem):
-        # forward QListWidget selection to the same handler signature
         booking = item.data(Qt.ItemDataRole.UserRole)
         self.on_booking_selected(None, True, booking)
 
-    def update_booking_list(self, search: str = ""):
-        results = searchers[Booking](0, 20, search)
-        self.booking_list.clear()
+    def update_services(self, search: str = ""):
+        results: list[BookingService] = searchers[BookingService](
+            self.booking_id, 0, 20, search
+        )
+        while self.services_area.rowCount() > 0:
+            self.services_area.removeRow(0)
         for r in results:
-            it = QListWidgetItem(str(r), self.booking_list)
-            it.setData(Qt.ItemDataRole.UserRole, r)
-            self.booking_list.addItem(it)
+            # make it so that it can add and remove services in a map from service to duration
+            # service name
+            service_name = QLabel(f"{r.service_id} ({r.duration} min)")
+            # delete button
+
+            double_button_spread = QWidget(self.details_panel)
+            double_layout = QHBoxLayout()
+            double_button_spread.setLayout(double_layout)
+
+            completion_text = "Done" if r.completed else "Not done"
+            completion_button = QPushButton(
+                text=completion_text, parent=double_button_spread
+            )
+            double_layout.addWidget(completion_button)
+
+            completion_button.clicked.connect(
+                lambda checked, r=r: self.handle_complete_service(r)
+            )
+
+            delete_button = QPushButton(text="Delete", parent=double_button_spread)
+            delete_button.clicked.connect(
+                lambda checked, r=r: self.handle_delete_service(r)
+            )
+            double_layout.addWidget(delete_button)
+
+            self.services_area.addRow(service_name, double_button_spread)
+
+    def handle_add_new_service(self, e):
+        model = BookingService(
+            booking_id=self.booking_id,
+            service_id="",
+            duration=30,
+            id=-1,
+            completed=False,
+        )
+        modal = create_modal_floating(
+            "Add New Service",
+            model,
+            on_done=self.handle_add_new_service_done,
+            ignore_fields=["id", "booking_id", "completed"],
+            rename_fields={
+                "duration": "duration (min)",
+                "service_id": "service",
+            },
+            search_fields={
+                "service_id": Service,
+                "booking_id": Booking,
+            },
+        )
+
+    def handle_delete_service(self, booking_service: BookingService):
+        try:
+            query.delete_booking_service(
+                booking_service.booking_id,
+                booking_service.service_id,
+            )
+            self.update_services()
+        except Exception as e:
+            print(f"Error: {e}")
+
+    def handle_add_new_service_done(
+        self, dialog: QDialog, success: bool, service: BookingService
+    ):
+        if success:
+            try:
+                # find a service with same stuff
+                existing_service = query.get_service_by_booking_and_service(
+                    service.booking_id, service.service_id
+                )
+                if existing_service and existing_service.one() is not None:
+                    print("Service already exists.")
+                    return
+                if service.booking_id < 0:
+                    print("Error: Booking ID is not set.")
+                    return
+                if not service.service_id:
+                    print("Error: Service ID is not set.")
+                    return
+                if service.duration <= 0:
+                    print("Error: Duration must be positive.")
+                    return
+
+                query.create_booking_service(
+                    service_id=service.service_id,
+                    booking_id=service.booking_id,
+                    duration=service.duration,
+                )
+
+                self.update_services()
+            except Exception as e:
+                print(f"Error: {e}")
+        dialog.close()
+
+    def handle_complete_service(self, booking_service: BookingService):
+        try:
+            query.toggle_completion_booking_service(
+                booking_service.booking_id,
+                booking_service.service_id,
+            )
+            self.update_services()
+        except Exception as e:
+            print(f"Error: {e}")
+
+
+# Gives a calendar view of all the bookings for this client on the left
+# and a right panel split into details and actions
+class ClientBookingView(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.calendar = QCalendarWidget(self)
+        self.calendar.setGridVisible(True)
+        self.calendar.clicked.connect(self.handle_date_selected)
+        self.calendar.setMinimumDate(QDate.currentDate())
+        self.calendar.setMaximumDate(QDate.currentDate().addMonths(3))
+
+        # details area is a scroll area with an internal container widget
+        self.details_widget = QScrollArea(self)
+        self.details_widget.setWidgetResizable(True)
+        self.details_container = QWidget()
+        # vertical layout inside the scroll area's internal widget
+        self.details_layout = QVBoxLayout(self.details_container)
+        self.details_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.details_container.setLayout(self.details_layout)
+        self.details_widget.setWidget(self.details_container)
+
+        self.splitter = QWidget(self)
+        self.split_layout = QHBoxLayout(self.splitter)
+        self.split_layout.addWidget(self.calendar, 1)
+        self.split_layout.addWidget(self.details_widget, 1)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.splitter)
+
+        self.setLayout(layout)
+
+        database.database_updated.connect(self.update_calendar)
+
+    def set_client(self, client: Person):
+        self.client = client
+        self.setWindowTitle(f"Bookings for {client.first_name} {client.last_name}")
+
+    def update_calendar(self):
+        if self.selected_date is not None:
+            self.handle_date_selected(self.selected_date)
+        else:
+            self.clear_details()
+
+    def clear_details(self):
+        while self.details_layout.count():
+            item = self.details_layout.takeAt(0)
+            if item is None:
+                break
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+            else:
+                # if it's a nested layout, try to clear it recursively
+                try:
+                    sublayout = item.layout()
+                    while sublayout and sublayout.count():
+                        sub = sublayout.takeAt(0)
+                        if sub and sub.widget():
+                            sub.widget().setParent(None)
+                            sub.widget().deleteLater()
+                except Exception:
+                    pass
+
+    def handle_date_selected(self, date: QDate):
+        self.selected_date = date
+        self.clear_details()
+
+        booking_services: list[BookingService] = query.get_services_person_and_date(
+            self.client.id, date.toPython(), date.toPython()
+        ).value
+
+        bookings: dict[int, list[BookingService]] = dict()
+        for service in booking_services:
+            if service.booking_id not in bookings:
+                bookings[service.booking_id] = []
+            bookings[service.booking_id].append(service)
+
+        for booking_id, booking_services in bookings.items():
+            inner_widget = QWidget(self.details_container)
+            inner_layout = QVBoxLayout(inner_widget)
+            booking_strings = query.get_booking_string(booking_id).one()
+            inner_layout.addWidget(QLabel(f"Property: {booking_strings.property_name}"))
+
+            total = query.get_booking_cost(booking_id).one()
+            payment = query.get_payment_totals_by_booking(booking_id).one()
+            inner_layout.addWidget(
+                QLabel(f"Payment Total ($): {payment.total_amount}/{total.total}")
+            )
+
+            remaining_payment = total.total - payment.total_amount
+            inner_layout.addWidget(
+                QLabel(f"Remaining Payment ($): {remaining_payment}")
+            )
+
+            add_payment_button = QPushButton("Add Payment", inner_widget)
+            add_payment_button.clicked.connect(
+                lambda _, bid=booking_id, rp=remaining_payment: self.add_payment(
+                    bid, rp
+                )
+            )
+            if remaining_payment <= 0:
+                add_payment_button.setEnabled(False)
+                add_payment_button.setText("Payment Complete")
+            inner_layout.addWidget(add_payment_button)
+
+            inner_layout.addWidget(QFrame(inner_widget, frameShape=QFrame.Shape.HLine))
+
+            for service in booking_services:
+                print(booking_id, service.service_id)
+                strings: query.BookingServiceStrings = query.get_booking_service_string(
+                    booking_id, service.service_id
+                ).one()
+                inner_layout.addWidget(QLabel(f"Service: {strings.service_name}"))
+                inner_layout.addWidget(QLabel(f"Price ($): {strings.price}"))
+                inner_layout.addWidget(QLabel(f"Duration (mins): {strings.duration}"))
+                inner_layout.addWidget(
+                    QLabel(f"Completed : {True if strings.completed else False}")
+                )
+                inner_layout.addStretch(1)
+                # add widget to the details container layout so scroll area updates
+                self.details_layout.addWidget(inner_widget)
+                inner_layout.addWidget(
+                    QFrame(inner_widget, frameShape=QFrame.Shape.HLine)
+                )
+        # keep items at top; add final stretch so content hugs top when few items
+        self.details_layout.addStretch(1)
+
+    def add_payment(self, booking_id: int, remaining_payment: float):
+        model = Payment(
+            id=-1,
+            booking_id=booking_id,
+            amount=0.0,
+            payment_date=date.today(),
+        )
+        modal = create_modal_floating(
+            "Payment",
+            model=model,
+            on_done=self.handle_payment_done,
+            field_limits={"amount": (0, remaining_payment)},
+            ignore_fields=["id", "booking_id", "payment_date"],
+        )
+
+    def handle_payment_done(self, dialog: QDialog, success: bool, payment: Payment):
+        if success:
+            query.create_payment(
+                payment.booking_id, payment.amount, payment.payment_date
+            )
+        dialog.close()
 
 
 class LoginFrame(QWidget):
@@ -797,12 +1220,14 @@ class LoginFrame(QWidget):
 
 TAB_MANAGE_PERSONS = 0
 TAB_MANAGE_PROPERTIES = 1
-TAB_MANAGE_BOOKINGS = 2
+TAB_MANAGE_SERVICES = 2
 TAB_MANAGE_BOOKING_SERVICES = 3
+
+TAB_CLIENT_BOOKINGS = 4
 
 
 class Ui(QMainWindow):
-    def __init__(self):
+    def __init__(self, user=None, password=None):
         super().__init__()
 
         self.logged_in_as_user: Person | None = None
@@ -861,12 +1286,19 @@ class Ui(QMainWindow):
         self.tab_widget.addTab(self.manage_persons_widget, "Manage Persons")
         self.manage_properties_widget = PropertyManagement()
         self.tab_widget.addTab(self.manage_properties_widget, "Manage Properties")
-        self.manage_bookings_widget = BookingManagement()
-        self.tab_widget.addTab(self.manage_bookings_widget, "Manage Bookings")
+        self.manage_services_widget = ServiceManagement()
+        self.tab_widget.addTab(self.manage_services_widget, "Manage Services")
         self.manage_booking_services_widget = BookingServiceManagement()
         self.tab_widget.addTab(
             self.manage_booking_services_widget, "Manage Booking Services"
         )
+
+        # client only
+        self.client_bookings_widget = ClientBookingView()
+        self.tab_widget.addTab(self.client_bookings_widget, "Client Bookings")
+
+        if user is not None and password is not None:
+            self.handle_login(user, password)
 
         self.handle_state()
 
@@ -886,8 +1318,10 @@ class Ui(QMainWindow):
         )
         self.tab_widget.setTabVisible(TAB_MANAGE_PERSONS, is_employee)
         self.tab_widget.setTabVisible(TAB_MANAGE_PROPERTIES, is_employee)
-        self.tab_widget.setTabVisible(TAB_MANAGE_BOOKINGS, is_employee)
+        self.tab_widget.setTabVisible(TAB_MANAGE_SERVICES, is_employee)
         self.tab_widget.setTabVisible(TAB_MANAGE_BOOKING_SERVICES, is_employee)
+
+        self.tab_widget.setTabVisible(TAB_CLIENT_BOOKINGS, not is_employee)
 
     def handle_login(self, username: str, password: str):
         result = query.login_person(username, auth.hash_plaintext(password))
@@ -896,7 +1330,9 @@ class Ui(QMainWindow):
             print(f"Login failed: {result.error}")
         else:
             self.logged_in_as_user = result.one()
-            print(f"Login successful: {self.logged_in_as_user}")
+            if self.logged_in_as_user:
+                print(f"Login successful: {self.logged_in_as_user}")
+                self.client_bookings_widget.set_client(self.logged_in_as_user)
 
         self.handle_state()
 

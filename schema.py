@@ -48,7 +48,7 @@ class Booking(DbModel):
 
 
 class Service(DbModel):
-    name: str
+    id: str
     description: str
     price: float
 
@@ -56,20 +56,21 @@ class Service(DbModel):
         """
         Returns a nicely formatted string representation of the service.
         """
-        return f"{self.name} - {self.description} (${self.price:.2f})"
+        return f"{self.id} - {self.description} (${self.price:.2f})"
 
 
 class BookingService(DbModel):
     booking_id: int
-    service_id: int
+    service_id: str
     # in minutes
     duration: int
+    completed: bool
 
     def __str__(self) -> str:
         """
         Returns a nicely formatted string representation of the booking service.
         """
-        return f"BookingService {self.id} - Booking {self.booking_id} - Service {self.service_id} - Duration {self.duration} minutes"
+        return f"BookingService {self.id} - Booking {self.booking_id} - Service {self.service_id} - Duration {self.duration} minutes - Completed {self.completed}"
 
 
 class Payment(DbModel):

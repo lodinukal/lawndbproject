@@ -83,6 +83,12 @@ wheels = [
 ]
 
 [[package]]
+name = "fpdf"
+version = "1.7.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/37/c6/608a9e6c172bf9124aa687ec8b9f0e8e5d697d59a5f4fad0e2d5ec2a7556/fpdf-1.7.2.tar.gz", hash = "sha256:125840783289e7d12552b1e86ab692c37322e7a65b96a99e0ea86cca041b6779", size = 39504, upload-time = "2015-01-21T00:07:47.493Z" }
+
+[[package]]
 name = "idna"
 version = "3.10"
 source = { registry = "https://pypi.org/simple" }
@@ -162,6 +168,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pyedifice"
+version = "4.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "qasync" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/03/bf/1bc57e424a5a2acca17fe984012f159027c8138961c53e67dd4057e8c429/pyedifice-4.3.0.tar.gz", hash = "sha256:f75bd19b76765697a3d5a182c9a90fce4fba4c878dab6af25f4769632f6cba63", size = 400889, upload-time = "2025-07-19T15:44:02.889Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bd/fc/12df70fc88397e60ff7e74dd3fccf4864f016a120045ef1458004b3c4fff/pyedifice-4.3.0-py3-none-any.whl", hash = "sha256:9266628810ba60752401f28252839281f49e1130f352a0217ff0534a3685cb6d", size = 857266, upload-time = "2025-07-19T15:44:00.681Z" },
+]
+
+[[package]]
 name = "pyside6"
 version = "6.9.1"
 source = { registry = "https://pypi.org/simple" }
@@ -231,6 +250,15 @@ wheels = [
 ]
 
 [[package]]
+name = "qasync"
+version = "0.27.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1c/e0/7c7c973f52e1765d6ddfc41e9272294f65d5d52b8f5f5eae92adf411ad46/qasync-0.27.1.tar.gz", hash = "sha256:8dc768fd1ee5de1044c7c305eccf2d39d24d87803ea71189d4024fb475f4985f", size = 14287, upload-time = "2023-11-19T14:19:55.535Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/51/06/bc628aa2981bcfd452a08ee435b812fd3eee4ada8acb8a76c4a09d1a5a77/qasync-0.27.1-py3-none-any.whl", hash = "sha256:5d57335723bc7d9b328dadd8cb2ed7978640e4bf2da184889ce50ee3ad2602c7", size = 14866, upload-time = "2023-11-19T14:19:54.345Z" },
+]
+
+[[package]]
 name = "regex"
 version = "2025.7.34"
 source = { registry = "https://pypi.org/simple" }
@@ -295,9 +323,12 @@ dependencies = [
     { name = "customtkinter" },
     { name = "dateparser" },
     { name = "faker" },
+    { name = "fpdf" },
     { name = "pydantic", extra = ["email"] },
     { name = "pydantic-extra-types" },
+    { name = "pyedifice" },
     { name = "pyside6" },
+    { name = "pyside6-essentials" },
 ]
 
 [package.metadata]
@@ -305,9 +336,12 @@ requires-dist = [
     { name = "customtkinter", specifier = ">=5.2.2" },
     { name = "dateparser", specifier = ">=1.2.2" },
     { name = "faker", specifier = ">=37.5.3" },
+    { name = "fpdf", specifier = ">=1.7.2" },
     { name = "pydantic", extras = ["email"], specifier = ">=2.11.7" },
     { name = "pydantic-extra-types", specifier = ">=2.10.5" },
+    { name = "pyedifice", specifier = ">=4.3.0" },
     { name = "pyside6", specifier = ">=6.9.1" },
+    { name = "pyside6-essentials", specifier = ">=6.9.1" },
 ]
 
 [[package]]
