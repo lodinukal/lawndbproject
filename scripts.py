@@ -466,7 +466,7 @@ SELECT * FROM BookingService WHERE booking_id = :booking_id AND (service_id LIKE
 # :start_date string - The start date of the range (ISO 8601 format)
 # :end_date string - The end date of the range (ISO 8601 format)
 GET_SERVICES_BY_DATE = """
-SELECT * FROM BookingService WHERE booking_id id IN (SELECT id FROM Booking WHERE (booking_date BETWEEN :start_date AND :end_date))
+SELECT * FROM BookingService WHERE booking_id IN (SELECT id FROM Booking WHERE (booking_date BETWEEN :start_date AND :end_date))
 """
 
 # Get booking services for a specific person within a date range
@@ -592,7 +592,7 @@ SELECT COUNT(*) as count FROM Roster WHERE person_id = :person_id
 # :limit integer - The maximum number of people to return
 # :offset integer - The number of people to skip
 GET_PEOPLE_PAGE_BY_SERVICE = """
-SELECT * FROM Roster WHERE booking_service_id = :booking_service_id LIMIT :limit OFFSET :offset
+SELECT * FROM Person WHERE id IN (SELECT person_id FROM Roster WHERE booking_service_id = :booking_service_id LIMIT :limit OFFSET :offset)
 """
 
 # Gets a page of services for a person
@@ -600,5 +600,5 @@ SELECT * FROM Roster WHERE booking_service_id = :booking_service_id LIMIT :limit
 # :limit integer - The maximum number of services to return
 # :offset integer - The number of services to skip
 GET_SERVICES_PAGE_BY_PERSON = """
-SELECT * FROM Roster WHERE person_id = :person_id LIMIT :limit OFFSET :offset
+SELECT * FROM BookingService WHERE id IN (SELECT booking_service_id FROM Roster WHERE person_id = :person_id LIMIT :limit OFFSET :offset)
 """

@@ -56,7 +56,7 @@ def execute(query: str, params: dict = None) -> QueryResult:
         if cursor.rowcount > 0:
             database_updated.emit()
     except Exception as e:
-        print(traceback.format_exc())
+        traceback.print_exception(e)
         result.error = str(e)
         print(f"Error executing query: {result.error}")
 

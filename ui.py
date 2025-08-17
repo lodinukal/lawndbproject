@@ -52,7 +52,16 @@ import auth
 import database
 from fakes import generate_person, generate_property
 import query
-from schema import Booking, BookingService, Payment, Person, Property, DbModel, Service
+from schema import (
+    Booking,
+    BookingService,
+    Payment,
+    Person,
+    Property,
+    DbModel,
+    Roster,
+    Service,
+)
 
 
 class TableView(QWidget):
@@ -1034,11 +1043,173 @@ class BookingServiceManagement(QWidget):
             print(f"Error: {e}")
 
 
+class RosterView(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.calendar = QCalendarWidget(self)
+        self.calendar.setGridVisible(True)
+        self.calendar.clicked.connect(self.handle_date_selected)
+        self.calendar.setMinimumDate(QDate.currentDate())
+        self.calendar.setMaximumDate(QDate.currentDate().addMonths(3))
+
+        self.details_widget = QScrollArea(self)
+        self.details_widget.setWidgetResizable(True)
+        self.details_container = QWidget()
+        self.details_layout = QVBoxLayout(self.details_container)
+        self.details_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.details_container.setLayout(self.details_layout)
+        self.details_widget.setWidget(self.details_container)
+
+        self.splitter = QWidget(self)
+        self.split_layout = QHBoxLayout(self.splitter)
+        self.split_layout.addWidget(self.calendar, 1)
+        self.split_layout.addWidget(self.details_widget, 1)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.splitter)
+
+        self.setLayout(layout)
+
+        database.database_updated.connect(self.update_calendar)
+
+    def update_calendar(self):
+        if self.selected_date is not None:
+            self.handle_date_selected(self.selected_date)
+        else:
+            self.clear_details()
+
+    def clear_details(self):
+        while self.details_layout.count():
+            item = self.details_layout.takeAt(0)
+            if item is None:
+                break
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+            else:
+                # if it's a nested layout, try to clear it recursively
+                try:
+                    sublayout = item.layout()
+                    while sublayout and sublayout.count():
+                        sub = sublayout.takeAt(0)
+                        if sub and sub.widget():
+                            sub.widget().setParent(None)
+                            sub.widget().deleteLater()
+                except Exception:
+                    pass
+
+    def handle_date_selected(self, date: QDate):
+        self.selected_date = date
+        self.clear_details()
+
+        booking_services: list[BookingService] = query.get_services_by_date(
+            date.toPython(), date.toPython()
+        ).value
+
+        bookings: dict[int, list[BookingService]] = dict()
+        for service in booking_services:
+            if service.booking_id not in bookings:
+                bookings[service.booking_id] = []
+            bookings[service.booking_id].append(service)
+
+        for booking_id, booking_services in bookings.items():
+            inner_widget = QWidget(self.details_container)
+            inner_layout = QVBoxLayout(inner_widget)
+            booking_strings = query.get_booking_string(booking_id).one()
+            inner_layout.addWidget(QLabel(f"Customer: {booking_strings.person_name}"))
+            inner_layout.addWidget(QLabel(f"Property: {booking_strings.property_name}"))
+
+            inner_layout.addWidget(QFrame(inner_widget, frameShape=QFrame.Shape.HLine))
+
+            for service in booking_services:
+                strings: query.BookingServiceStrings = query.get_booking_service_string(
+                    booking_id, service.service_id
+                ).one()
+
+                people = query.get_people_page_by_service(service.id, 0, 100).value
+
+                inner_layout.addWidget(QLabel(f"Service: {strings.service_name}"))
+                inner_layout.addWidget(QLabel(f"Price ($): {strings.price}"))
+                inner_layout.addWidget(QLabel(f"Duration (mins): {strings.duration}"))
+                inner_layout.addWidget(
+                    QLabel(f"Completed : {True if strings.completed else False}")
+                )
+
+                form_layout = QFormLayout(inner_widget)
+                for person in people:
+                    button = QPushButton("Remove")
+                    button.clicked.connect(
+                        lambda _, p=person, s=service: self.remove_person(p, s)
+                    )
+                    form_layout.addRow(
+                        QLabel(f"{person.first_name} {person.last_name}"), button
+                    )
+
+                completed = service.completed
+
+                service_id = service.id
+                add_new_person_button = QPushButton("Add New Person", inner_widget)
+                add_new_person_button.clicked.connect(
+                    lambda _, s=service_id: self.add_person_to_service(s)
+                )
+                if completed:
+                    add_new_person_button.setEnabled(False)
+                    add_new_person_button.setText("Completed")
+                form_layout.addRow(add_new_person_button)
+                inner_layout.addLayout(form_layout)
+
+                inner_layout.addStretch(1)
+                # add widget to the details container layout so scroll area updates
+                self.details_layout.addWidget(inner_widget)
+                inner_layout.addWidget(
+                    QFrame(inner_widget, frameShape=QFrame.Shape.HLine)
+                )
+        # keep items at top; add final stretch so content hugs top when few items
+        self.details_layout.addStretch(1)
+
+    def remove_person(self, person: Person, service: BookingService):
+        query.delete_roster(person.id, service.id)
+        self.update_calendar()
+
+    def add_person_to_service(self, booking_service_id: int):
+        model = Roster(
+            id=-1,
+            person_id=-1,
+            booking_service_id=booking_service_id,
+        )
+        print(booking_service_id)
+        modal = create_modal_floating(
+            "Add Person to Service",
+            model,
+            on_done=self.handle_add_person_done,
+            ignore_fields=["id", "booking_service_id"],
+            rename_fields={"person_id": "person"},
+            search_fields={"person_id": Person},
+        )
+
+    def handle_add_person_done(self, dialog: QDialog, success: bool, roster: Roster):
+        if success:
+            try:
+                if roster.person_id < 0:
+                    raise ValueError("Invalid person ID")
+                person = query.get_person_by_id(roster.person_id).one()
+                if not person:
+                    raise ValueError("Person not found")
+                if not person.is_employee:
+                    raise ValueError("Person is not an employee")
+                query.create_roster(roster.person_id, roster.booking_service_id)
+            except Exception as e:
+                print(f"Error adding roster: {e}")
+        dialog.close()
+
+
 # Gives a calendar view of all the bookings for this client on the left
 # and a right panel split into details and actions
 class ClientBookingView(QWidget):
     def __init__(self):
         super().__init__()
+        self.selected_date = None
         self.calendar = QCalendarWidget(self)
         self.calendar.setGridVisible(True)
         self.calendar.clicked.connect(self.handle_date_selected)
@@ -1222,8 +1393,9 @@ TAB_MANAGE_PERSONS = 0
 TAB_MANAGE_PROPERTIES = 1
 TAB_MANAGE_SERVICES = 2
 TAB_MANAGE_BOOKING_SERVICES = 3
+TAB_MANAGE_ROSTER = 4
 
-TAB_CLIENT_BOOKINGS = 4
+TAB_CLIENT_BOOKINGS = 5
 
 
 class Ui(QMainWindow):
@@ -1292,6 +1464,8 @@ class Ui(QMainWindow):
         self.tab_widget.addTab(
             self.manage_booking_services_widget, "Manage Booking Services"
         )
+        self.manage_roster_widget = RosterView()
+        self.tab_widget.addTab(self.manage_roster_widget, "Manage Roster")
 
         # client only
         self.client_bookings_widget = ClientBookingView()
@@ -1320,6 +1494,7 @@ class Ui(QMainWindow):
         self.tab_widget.setTabVisible(TAB_MANAGE_PROPERTIES, is_employee)
         self.tab_widget.setTabVisible(TAB_MANAGE_SERVICES, is_employee)
         self.tab_widget.setTabVisible(TAB_MANAGE_BOOKING_SERVICES, is_employee)
+        self.tab_widget.setTabVisible(TAB_MANAGE_ROSTER, is_employee)
 
         self.tab_widget.setTabVisible(TAB_CLIENT_BOOKINGS, not is_employee)
 
