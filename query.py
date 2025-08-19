@@ -40,8 +40,9 @@ class Result[T]:
 
 def debug_passthrough(transformer) -> T:
     def wrapper(*args: any, **kwargs: any) -> T:
+        print("Debug Passthrough:", args, kwargs, "->")
         result = transformer(*args, **kwargs)
-        print("Debug Passthrough:", args, kwargs, "->", result)
+        print("Result:", result)
         return result
 
     return wrapper
@@ -51,7 +52,7 @@ def __execute(
     transformer: Callable[[Row], T], script: str, params: dict = None
 ) -> Result[T]:
     result = database.execute(script, params)
-    transformer = debug_passthrough(transformer)
+    # transformer = debug_passthrough(transformer)
     try:
         new_data = (
             list(map(lambda row: transformer(**row), result.data))
@@ -60,8 +61,8 @@ def __execute(
         )
         return Result[T](error=result.error, value=new_data, lastrowid=result.lastrowid)
     except ValidationError as e:
-        print(inspect.stack()[1][3])
-        print("Error occurred:", e.json())
+        here = inspect.stack()[1][3]
+        print("Error occurred:", here, ",", e.json())
         print(traceback.format_exc(limit=10))
         return Result[T](error=str(e), value=[])
 
@@ -732,3 +733,44 @@ def get_services_page_by_person(
         scripts.GET_SERVICES_PAGE_BY_PERSON,
         {"person_id": person_id, "offset": offset, "limit": limit},
     )
+
+
+class BookingPayment(pydantic.BaseModel):
+    id: int
+    total_amount: float
+    outstanding_amount: float
+
+
+def get_unpaid_bookings() -> Result[BookingPayment]:
+    return __execute(BookingPayment, scripts.GET_UNPAID_BOOKINGS, {})
+
+
+class MonthIncome(pydantic.BaseModel):
+    month: str
+    num_payments: int
+    total_revenue: float
+
+
+def get_income_by_month() -> Result[MonthIncome]:
+    return __execute(MonthIncome, scripts.GET_INCOME_BY_MONTH, {})
+
+
+class OutstandingClient(pydantic.BaseModel):
+    person_id: int
+    person_name: str
+    total_paid: float
+    total_due: float
+    outstanding_amount: float
+
+
+def get_outstanding_clients() -> Result[OutstandingClient]:
+    return __execute(OutstandingClient, scripts.GET_OUTSTANDING_CLIENTS, {})
+
+
+class ServicePopularity(pydantic.BaseModel):
+    service_id: str
+    num_bookings: int
+
+
+def get_popular_services() -> Result[ServicePopularity]:
+    return __execute(ServicePopularity, scripts.GET_POPULAR_SERVICES, {})

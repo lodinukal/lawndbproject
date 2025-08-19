@@ -1090,6 +1090,8 @@ class RosterView(QWidget):
 
         self.setLayout(layout)
 
+        self.selected_date: QDate | None = None
+
         database.database_updated.connect(self.update_calendar)
 
     def handle_generate_roster(self):
@@ -1315,7 +1317,6 @@ class RosterView(QWidget):
             person_id=-1,
             booking_service_id=booking_service_id,
         )
-        print(booking_service_id)
         modal = create_modal_floating(
             "Add Person to Service",
             model,
@@ -1457,7 +1458,6 @@ class ClientBookingView(QWidget):
             inner_layout.addWidget(QFrame(inner_widget, frameShape=QFrame.Shape.HLine))
 
             for service in booking_services:
-                print(booking_id, service.service_id)
                 strings: query.BookingServiceStrings = query.get_booking_service_string(
                     booking_id, service.service_id
                 ).one()
@@ -1557,6 +1557,45 @@ class ClientBookingView(QWidget):
         )
 
 
+class StatsView(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        split_left_right_layout = QHBoxLayout(self)
+
+        # left is a list of queries
+        self.queries_list = QFormLayout(self)
+        split_left_right_layout.addLayout(self.queries_list)
+
+        # right is a List
+        self.results_list = QListWidget(self)
+        split_left_right_layout.addWidget(self.results_list)
+
+        # some queries
+        queries = {
+            "Unpaid bookings": query.get_unpaid_bookings,
+            "Income by month": query.get_income_by_month,
+            "Outstanding clients": query.get_outstanding_clients,
+            "Popular services": query.get_popular_services,
+        }
+        for query_name, query_func in queries.items():
+            button = QPushButton(query_name, self)
+            button.clicked.connect(lambda _, f=query_func: self.run_query(f))
+            self.queries_list.addWidget(button)
+
+    def clear(self):
+        self.results_list.clear()
+
+    def run_query(self, query_func):
+        self.clear()
+        results = query_func()
+        if results.value:
+            for result in results.value:
+                self.results_list.addItem(str(result))
+        else:
+            self.results_list.addItem("No results found.")
+
+
 class LoginFrame(QWidget):
     def __init__(
         self, on_login: Callable[[str, str], Any], close_event: Callable[[], Any]
@@ -1590,13 +1629,14 @@ class LoginFrame(QWidget):
         self.close_event()
 
 
-TAB_MANAGE_PERSONS = 0
-TAB_MANAGE_PROPERTIES = 1
-TAB_MANAGE_SERVICES = 2
-TAB_MANAGE_BOOKING_SERVICES = 3
-TAB_MANAGE_ROSTER = 4
+TAB_STATS = 0
+TAB_MANAGE_PERSONS = 1
+TAB_MANAGE_PROPERTIES = 2
+TAB_MANAGE_SERVICES = 3
+TAB_MANAGE_BOOKING_SERVICES = 4
+TAB_MANAGE_ROSTER = 5
 
-TAB_CLIENT_BOOKINGS = 5
+TAB_CLIENT_BOOKINGS = 6
 
 
 class Ui(QMainWindow):
@@ -1655,6 +1695,8 @@ class Ui(QMainWindow):
         central_layout.addWidget(self.tab_widget)
 
         # employee only
+        self.stats_widget = StatsView()
+        self.tab_widget.addTab(self.stats_widget, "Statistics")
         self.manage_persons_widget = PersonManagement()
         self.tab_widget.addTab(self.manage_persons_widget, "Manage Persons")
         self.manage_properties_widget = PropertyManagement()
@@ -1691,6 +1733,8 @@ class Ui(QMainWindow):
         is_employee = (
             self.logged_in_as_user.is_employee if self.logged_in_as_user else False
         )
+
+        self.tab_widget.setTabVisible(TAB_STATS, is_employee)
         self.tab_widget.setTabVisible(TAB_MANAGE_PERSONS, is_employee)
         self.tab_widget.setTabVisible(TAB_MANAGE_PROPERTIES, is_employee)
         self.tab_widget.setTabVisible(TAB_MANAGE_SERVICES, is_employee)

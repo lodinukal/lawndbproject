@@ -8,7 +8,7 @@ from util import Signal
 
 connection = sqlite3.connect("lawn_database.db")
 connection.row_factory = sqlite3.Row
-connection.set_trace_callback(print)  # Enable debug output for SQL queries
+# connection.set_trace_callback(print)  # Enable debug output for SQL queries
 cursor = connection.cursor()
 database_updated = Signal()
 

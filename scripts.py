@@ -7,39 +7,53 @@ CREATE TABLE IF NOT EXISTS Person (
     username VARCHAR(50) NOT NULL UNIQUE,
     first_name VARCHAR(50) NOT NULL,
     last_name VARCHAR(50) NOT NULL,
-    email VARCHAR(100) NOT NULL UNIQUE,
-    phone_number VARCHAR(15) NOT NULL,
+    -- email validation
+    -- anything@example.com
+    email VARCHAR(100) CHECK (email GLOB '*@*.*') NOT NULL UNIQUE,
+    /* australian mobile phone number format
+     04xxxxxxxx */
+    phone_number VARCHAR(15) CHECK (phone_number GLOB '04[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]') NOT NULL,
     -- default to making a customer
     is_employee BOOLEAN NOT NULL DEFAULT 0,
-    hashed_password VARCHAR(256) NOT NULL
+    hashed_password VARCHAR(256) CHECK (LENGTH(hashed_password) > 0)  NOT NULL
 );
 CREATE TABLE IF NOT EXISTS Property (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     street_address VARCHAR(255) NOT NULL,
     city VARCHAR(50) NOT NULL,
-    state VARCHAR(50) NOT NULL,
-    post_code VARCHAR(10) NOT NULL
+    state VARCHAR(50) CHECK (state IN 
+    ('Western Australia', 
+    'New South Wales', 
+    'Victoria', 
+    'Northern Territory', 
+    'Queensland', 
+    'South Australia', 
+    'Tasmania', 
+    'Australian Capital Territory')) NOT NULL,
+    /* 4 digit australian post code */
+    post_code VARCHAR(10) CHECK (post_code GLOB '[0-9][0-9][0-9][0-9]') NOT NULL
 );
 CREATE TABLE IF NOT EXISTS Booking (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     person_id INTEGER NOT NULL,
     property_id INTEGER NOT NULL,
     /* iso8601 */
-    booking_date TEXT NOT NULL,
+    booking_date TEXT CHECK (booking_date IS strftime('%Y-%m-%d', booking_date)) NOT NULL,
     FOREIGN KEY (person_id) REFERENCES Person(id),
     FOREIGN KEY (property_id) REFERENCES Property(id)
 );
 CREATE TABLE IF NOT EXISTS Service (
     id VARCHAR(100) PRIMARY KEY,
     description TEXT NOT NULL,
-    price DECIMAL(10, 2) NOT NULL
+    /* >= 0 */
+    price DECIMAL(10, 2) CHECK (price >= 0) NOT NULL
 );
 CREATE TABLE IF NOT EXISTS BookingService (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     booking_id INTEGER NOT NULL,
     service_id INTEGER NOT NULL,
-    duration INTEGER NOT NULL DEFAULT 60,
-    completed BOOLEAN NOT NULL DEFAULT 0,
+    duration INTEGER CHECK (duration > 0) NOT NULL DEFAULT 60,
+    completed BOOLEAN CHECK (completed IN (0, 1)) NOT NULL DEFAULT 0,
     FOREIGN KEY (booking_id) REFERENCES Booking(id),
     FOREIGN KEY (service_id) REFERENCES Service(id)
 );
@@ -47,8 +61,8 @@ CREATE TABLE IF NOT EXISTS BookingService (
 CREATE TABLE IF NOT EXISTS Payment (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     booking_id INTEGER NOT NULL,
-    amount DECIMAL(10, 2) NOT NULL,
-    payment_date TEXT NOT NULL,
+    amount DECIMAL(10, 2) CHECK (amount > 0) NOT NULL,
+    payment_date TEXT CHECK (payment_date IS strftime('%Y-%m-%d', payment_date)) NOT NULL,
     -- iso8601
     FOREIGN KEY (booking_id) REFERENCES Booking(id)
 );
@@ -64,7 +78,7 @@ CREATE TABLE IF NOT EXISTS Roster (
 # on conflict ignore, as we already have an admin user
 CREATE_ADMIN_USER = """
 INSERT INTO Person (id, first_name, last_name, email, phone_number, is_employee, hashed_password, username)
-VALUES (1, 'Admin', 'User', 'admin@example.com', '123-456-7890', 1, "{}", 'admin') ON CONFLICT DO NOTHING
+VALUES (1, 'Admin', 'User', 'admin@example.com', '0436123456', 1, "{}", 'admin') ON CONFLICT DO NOTHING
 """.format(
     auth.hash_plaintext("admin123")
 )
@@ -605,4 +619,77 @@ SELECT * FROM Person WHERE id IN (SELECT Roster.person_id FROM Roster WHERE book
 # :offset integer - The number of services to skip
 GET_SERVICES_PAGE_BY_PERSON = """
 SELECT * FROM BookingService WHERE id IN (SELECT booking_service_id FROM Roster WHERE person_id = :person_id LIMIT :limit OFFSET :offset)
+"""
+
+##
+## Statistics
+##
+
+# Gets the unpaid bookings
+GET_UNPAID_BOOKINGS = """
+SELECT id,
+       total_amount,
+       total_price,
+       (total_price - total_amount) AS outstanding_amount
+FROM (
+  SELECT b.id,
+         (SELECT COALESCE(SUM(amount), 0)
+          FROM Payment p
+          WHERE p.booking_id = b.id) AS total_amount,
+         (SELECT COALESCE(SUM(s.price), 0)
+          FROM BookingService bs
+          JOIN Service s ON bs.service_id = s.id
+          WHERE bs.booking_id = b.id) AS total_price
+  FROM Booking b
+) t
+WHERE total_amount < total_price
+ORDER BY outstanding_amount DESC
+"""
+
+# Revenue by months
+GET_INCOME_BY_MONTH = """
+SELECT
+strftime('%Y-%m', payment_date) AS month,
+COUNT(*) AS num_payments,
+SUM(amount) AS total_revenue
+FROM Payment
+GROUP BY month
+ORDER BY month DESC
+"""
+
+# Get customers who haven't paid
+GET_OUTSTANDING_CLIENTS = """
+WITH due AS (
+  SELECT b.person_id, COALESCE(SUM(s.price), 0) AS total_due
+  FROM Booking b
+  JOIN BookingService bs ON bs.booking_id = b.id
+  JOIN Service s ON s.id = bs.service_id
+  GROUP BY b.person_id
+),
+paid AS (
+  SELECT b.person_id, COALESCE(SUM(p.amount), 0) AS total_paid
+  FROM Booking b
+  JOIN Payment p ON p.booking_id = b.id
+  GROUP BY b.person_id
+)
+SELECT
+  per.id AS person_id,
+  per.first_name || ' ' || per.last_name AS person_name,
+  COALESCE(d.total_due, 0)   AS total_due,
+  COALESCE(pa.total_paid, 0) AS total_paid,
+  (COALESCE(d.total_due, 0) - COALESCE(pa.total_paid, 0)) AS outstanding_amount
+FROM Person per
+LEFT JOIN due d ON d.person_id = per.id
+LEFT JOIN paid pa ON pa.person_id = per.id
+WHERE (COALESCE(d.total_due, 0) - COALESCE(pa.total_paid, 0)) > 0
+ORDER BY outstanding_amount DESC
+"""
+
+# Get most popular services
+GET_POPULAR_SERVICES = """
+SELECT Service.id as service_id, COUNT(*) AS num_bookings
+FROM BookingService
+JOIN Service ON BookingService.service_id = Service.id
+GROUP BY Service.id
+ORDER BY num_bookings DESC
 """

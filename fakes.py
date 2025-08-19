@@ -7,13 +7,16 @@ fake = Faker(locale="en_AU")
 
 
 def generate_person() -> Person:
+    ms = fake.msisdn()
+    # make a 04xxxxxxxx number
+    ms = "04" + ms[5:]
     model = Person(
         id=-1,
         username=fake.user_name(),
         first_name=fake.first_name(),
         last_name=fake.last_name(),
         email=fake.email(),
-        phone_number=fake.phone_number(),
+        phone_number=ms,
         is_employee=False,
         hashed_password=auth.hash_plaintext(fake.password()),
     )
