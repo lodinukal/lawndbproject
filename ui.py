@@ -652,7 +652,7 @@ class PropertyManagement(QWidget):
             id=-1,
             city="Perth",
             post_code="6000",
-            state="WA",
+            state="Western Australia",
             street_address="123 Fake St",
         )
         modal = create_modal_floating(
